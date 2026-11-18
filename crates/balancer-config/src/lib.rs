@@ -442,6 +442,16 @@ static_dir = "public"
     }
 
     #[test]
+    fn validates_transport_examples_and_port_collision() {
+        let input = include_str!("../../../configs/transport.example.toml");
+        assert!(Config::parse(input).is_ok());
+        assert!(Config::parse(&input.replace("127.0.0.1:15432", "127.0.0.1:8080")).is_err());
+        assert!(Config::parse(&input.replace("max_sessions = 64", "max_sessions = 0")).is_err());
+        let h3=include_str!("../../../configs/http3.example.toml");
+        assert!(Config::parse(h3).is_ok());
+        assert!(Config::parse(&h3.replace("max_requests = 64","max_requests = 999")).is_err());
+    }
+    #[test]
     fn admin_requires_separate_loopback_listener() {
         let input = include_str!("../../../configs/admin.example.toml");
         assert!(Config::parse(input).is_ok());

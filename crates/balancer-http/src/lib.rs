@@ -136,6 +136,8 @@ async fn dispatch(State(runtime): State<Arc<Runtime>>, ConnectInfo(peer): Connec
 
 async fn dispatch_inner(runtime: &Runtime, peer: SocketAddr, ingress: Option<Extension<HttpsIngress>>, request: &mut Request) -> Response {
     let path = request.uri().path();
+    if request.method() == http::Method::CONNECT { return StatusCode::NOT_IMPLEMENTED.into_response(); }
+    if path.len() > 8192 || request.uri().path_and_query().is_some_and(|p|p.as_str().len() > 8192) { return StatusCode::URI_TOO_LONG.into_response(); }
     if !path.starts_with('/') { return StatusCode::BAD_REQUEST.into_response(); }
     let raw_host = match request_host(request) {
         Ok(host) => host,
@@ -148,6 +150,13 @@ async fn dispatch_inner(runtime: &Runtime, peer: SocketAddr, ingress: Option<Ext
             return StatusCode::MISDIRECTED_REQUEST.into_response();
         }
     }
+    // Do not let a Connection header suppress credentials or other end-to-end policy headers.
+    if request.headers().get_all(header::CONNECTION).iter().any(|value| {
+        value.to_str().map_or(true, |v| v.split(',').any(|token| {
+            let token=token.trim().to_ascii_lowercase();
+            !matches!(token.as_str(), "close" | "keep-alive" | "upgrade" | "te" | "trailer")
+        }))
+    }) { return StatusCode::BAD_REQUEST.into_response(); }
     let Some(route) = choose_route(&runtime.routes, host.as_deref(), path) else {
         return (StatusCode::NOT_FOUND, "no matching route").into_response();
     };
@@ -191,6 +200,7 @@ async fn dispatch_inner(runtime: &Runtime, peer: SocketAddr, ingress: Option<Ext
         return balancer_middleware::limits::guard(response, permit, runtime.idle);
     }
     if let Some(dir) = &route.static_dir {
+        if request.headers().contains_key(header::UPGRADE) { return StatusCode::NOT_IMPLEMENTED.into_response(); }
         // A mounted static directory does not include its route prefix on disk.
         let suffix = path.strip_prefix(route.path_prefix.as_str()).unwrap_or(path.as_str());
         let mut target = if route.path_prefix == "/" { path.to_owned() }
@@ -243,6 +253,16 @@ static_dir = "api"
         assert_eq!(choose_route(&cfg.routes, Some("example.test"), "/api/x").unwrap().path_prefix, "/api");
         assert_eq!(choose_route(&cfg.routes, Some("example.test"), "/apix").unwrap().path_prefix, "/");
         assert!(choose_route(&cfg.routes, Some("other.test"), "/api").unwrap().host.is_none());
+    }
+    #[tokio::test]
+    async fn rejects_connection_nominated_credentials_and_long_targets() {
+        let server=build(Config::parse(ROUTES).unwrap());
+        let make=|path:&str,connection:&str| {
+            let mut r=Request::builder().uri(path).header("connection",connection).body(Body::empty()).unwrap();
+            r.extensions_mut().insert(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()));r
+        };
+        assert_eq!(server.router.clone().oneshot(make("/","authorization")).await.unwrap().status(),StatusCode::BAD_REQUEST);
+        assert_eq!(server.router.clone().oneshot(make(&format!("/{}","a".repeat(8192)),"close")).await.unwrap().status(),StatusCode::URI_TOO_LONG);
     }
     #[tokio::test]
     async fn redirect_preserves_path_and_rejects_unknown_host() {

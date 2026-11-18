@@ -66,8 +66,9 @@ async fn main() -> Result<()> {
     } else { data_router.clone() };
     tracing::info!(address = %listener.local_addr()?, "HTTP listener bound");
     let http = async {
-        axum_server::from_tcp(listener)?.handle(http_handle)
-            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+        let mut server = axum_server::from_tcp(listener)?.handle(http_handle);
+        balancer_tls::harden_http(&mut server);
+        server.serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await.context("HTTP server")
     };
     let h3_tls = tls.clone();
@@ -82,7 +83,9 @@ async fn main() -> Result<()> {
     let management = async {
         if let (Some(listener), Some(app)) = (admin_listener, management_app) {
             tracing::info!(address = %listener.local_addr()?, "management listener bound");
-            axum_server::from_tcp(listener)?.handle(admin_handle).serve(app.into_make_service()).await.context("management server")?;
+            let mut server = axum_server::from_tcp(listener)?.handle(admin_handle).http1_only();
+            balancer_tls::harden_http(&mut server);
+            server.serve(app.into_make_service()).await.context("management server")?;
         }
         Ok::<(), anyhow::Error>(())
     };

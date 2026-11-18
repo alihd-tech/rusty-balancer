@@ -7,7 +7,7 @@
 - P4: CIDR policy, request/concurrency limits, response idle timeout, rate limiting, compression, conservative cache and HTTP/1.1 WebSocket forwarding (source implemented; verification pending).
 - P5: Authenticated loopback API, revision-checked runtime configuration apply/reload/rollback, metrics, access logs, health, cache purge and manual certificate reload (source implemented; verification pending).
 - P6: Bounded TCP/UDP, exact SNI TLS passthrough, outbound PROXY v1, experimental HTTP/3 ingress (source implemented; verification pending).
-- P7: Benchmarks, release packaging and deployment hardening.
+- P7: HTTP resource hardening, loopback integration/benchmark harnesses, strict release gate, candidate archive and checksums, Docker Compose and systemd hardening (tooling implemented; execution and public distribution pending).
 - P8: Optional Server OS integration through a stable control interface.
 
 Milestone status is provisional until workspace tests and integration tests pass.

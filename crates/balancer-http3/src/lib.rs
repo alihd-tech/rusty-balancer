@@ -50,7 +50,7 @@ impl Bound {
                     let (router,cfg,requests)=(router.clone(),cfg.clone(),requests.clone());
                     tasks.spawn(async move {
                         let _permit=permit;
-                        if let Ok(Ok(conn))=tokio::time::timeout(Duration::from_secs(10),incoming).await {
+                        if let Ok(Ok(conn))=tokio::time::timeout(Duration::from_secs(10),async { incoming.await }).await {
                             if let Err(error)=connection(conn,router,cfg,requests).await {tracing::debug!(%error,"HTTP/3 connection ended");}
                         }
                     });
@@ -108,6 +108,7 @@ async fn handle(request:Request<()>,mut stream:Stream,router:Router,peer:SocketA
         request.uri().scheme_str()!=Some("https") || request.uri().authority().is_none(){
         return reject(&mut stream,StatusCode::BAD_REQUEST).await;
     }
+    if request.headers().get_all(header::CONTENT_LENGTH).iter().count()>1 {return reject(&mut stream,StatusCode::BAD_REQUEST).await;}
     let declared=request.headers().get(header::CONTENT_LENGTH).map(|v|v.to_str().ok().and_then(|s|s.parse::<usize>().ok()));
     if matches!(declared,Some(None)) || declared.flatten().is_some_and(|n|n>max) {
         return reject(&mut stream,StatusCode::PAYLOAD_TOO_LARGE).await;
@@ -117,6 +118,7 @@ async fn handle(request:Request<()>,mut stream:Stream,router:Router,peer:SocketA
         if chunk.remaining()>max.saturating_sub(body.len()) {return reject(&mut stream,StatusCode::PAYLOAD_TOO_LARGE).await;}
         body.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
     }
+    if stream.recv_trailers().await?.is_some() {return reject(&mut stream,StatusCode::BAD_REQUEST).await;}
     if declared.flatten().is_some_and(|n|n!=body.len()){
         return reject(&mut stream,StatusCode::BAD_REQUEST).await;
     }

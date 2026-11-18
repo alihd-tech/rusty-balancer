@@ -14,3 +14,5 @@ if [[ "${TLS_SMOKE:-0}" == 1 ]]; then bash scripts/tls-smoke.sh; fi
 if [[ "${ADMIN_SMOKE:-0}" == 1 ]]; then bash scripts/admin-smoke.sh; fi
 
 cargo run -p rusty-balancer -- --config configs/transport.example.toml validate
+if [[ "${NETWORK_SMOKE:-0}" == 1 ]]; then python3 scripts/network-smoke.py; fi
+if [[ "${HTTP3_SMOKE:-0}" == 1 ]]; then bash scripts/http3-smoke.sh; fi

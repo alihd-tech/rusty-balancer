@@ -1,0 +1,40 @@
+[Unit]
+Description=Rusty Balancer
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=rusty-balancer
+Group=rusty-balancer
+WorkingDirectory=/var/lib/rusty-balancer
+StateDirectory=rusty-balancer
+StateDirectoryMode=0700
+ExecStartPre=/usr/local/bin/rusty-balancer --config /etc/rusty-balancer/balancer.toml validate
+ExecStart=/usr/local/bin/rusty-balancer --config /etc/rusty-balancer/balancer.toml serve
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=40
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+LimitNOFILE=32768
+TasksMax=512
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

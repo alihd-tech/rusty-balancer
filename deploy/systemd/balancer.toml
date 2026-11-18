@@ -1,0 +1,7 @@
+# Loopback-safe deployment example. Change only after testing and hardening.
+listen = "127.0.0.1:8080"
+[traffic]
+security_headers = true
+max_in_flight = 256
+[[routes]]
+static_dir = "/var/lib/rusty-balancer/public"

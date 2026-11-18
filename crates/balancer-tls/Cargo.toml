@@ -15,3 +15,4 @@ rustls-acme.workspace = true
 rustls-pemfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+hyper-util.workspace = true

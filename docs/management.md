@@ -43,3 +43,5 @@ Metrics include process-lifetime request/response counters, cancellation count, 
 Use a trusted local administrator only: the complete TOML API has authority to reconfigure upstreams and static roots. No public exposure, RBAC, remote TLS management transport, or persistent database is implemented. Socket/handshake caps and comprehensive validation remain future work.
 
 Run the local end-to-end smoke test with `ADMIN_SMOKE=1 bash scripts/check.sh` (requires curl and OpenSSL). The authenticated management request budget is eight concurrent requests with a 15-second asynchronous deadline. Never include tokens in logs or public files.
+
+P6 adds restart-only TCP/UDP and HTTP/3 settings. Manual certificate reload affects the TCP HTTPS listener only; restart to change the QUIC certificate. Readiness and metrics do not yet reflect L4 listener health.

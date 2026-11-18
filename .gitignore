@@ -7,3 +7,5 @@
 /state/
 *.key
 *.pem
+
+/dist/

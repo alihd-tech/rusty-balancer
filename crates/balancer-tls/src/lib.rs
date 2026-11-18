@@ -98,6 +98,16 @@ pub fn reload_manual(tls: &TlsConfig, handle: &RustlsConfig) -> Result<()> {
     Ok(())
 }
 
+pub fn harden_http<A>(server: &mut axum_server::Server<SocketAddr, A>) {
+    use std::time::Duration;
+    use hyper_util::rt::TokioTimer;
+    server.http_builder().http1().timer(TokioTimer::new())
+        .header_read_timeout(Duration::from_secs(10)).max_buf_size(32768).max_headers(100);
+    server.http_builder().http2().timer(TokioTimer::new()).max_concurrent_streams(64)
+        .max_header_list_size(16384).keep_alive_interval(Duration::from_secs(30))
+        .keep_alive_timeout(Duration::from_secs(10));
+}
+
 pub async fn serve(tls: TlsConfig, app: Router, handle: Handle<SocketAddr>, manual: Option<RustlsConfig>) -> Result<()> {
     let listener = std::net::TcpListener::bind(tls.listen).context("bind HTTPS listener")?;
     listener.set_nonblocking(true)?;
@@ -129,13 +139,17 @@ pub async fn serve(tls: TlsConfig, app: Router, handle: Handle<SocketAddr>, manu
         }
         let _worker = Worker(worker);
         tracing::info!(production = acme.production, "ACME TLS-ALPN-01 enabled");
-        axum_server::from_tcp(listener)?.acceptor(acceptor).handle(handle)
-            .serve(app.into_make_service_with_connect_info::<SocketAddr>()).await
+        let mut server = axum_server::from_tcp(listener)?.acceptor(acceptor).handle(handle);
+        harden_http(&mut server);
+        server.serve(app.into_make_service_with_connect_info::<SocketAddr>()).await
             .context("serve ACME HTTPS")
     } else {
         let config = manual.context("missing manual TLS handle")?;
-        axum_server::from_tcp_rustls(listener, config)?.handle(handle)
-            .serve(app.into_make_service_with_connect_info::<SocketAddr>()).await
+        let acceptor = axum_server::tls_rustls::RustlsAcceptor::new(config)
+            .handshake_timeout(std::time::Duration::from_secs(10));
+        let mut server = axum_server::from_tcp(listener)?.acceptor(acceptor).handle(handle);
+        harden_http(&mut server);
+        server.serve(app.into_make_service_with_connect_info::<SocketAddr>()).await
             .context("serve manual HTTPS")
     }
 }

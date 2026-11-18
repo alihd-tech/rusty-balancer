@@ -7,3 +7,5 @@ certs
 state
 *.key
 *.pem
+
+dist

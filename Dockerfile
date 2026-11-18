@@ -1,10 +1,10 @@
 FROM rust:bookworm AS build
 WORKDIR /src
 COPY . .
-RUN cargo build --release -p rusty-balancer
+RUN if [ -f Cargo.lock ]; then cargo build --locked --release -p rusty-balancer; else cargo build --release -p rusty-balancer; fi
 
 FROM debian:bookworm-slim
-RUN useradd --system --uid 10001 --create-home balancer
+RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin balancer
 WORKDIR /app
 COPY --from=build /src/target/release/rusty-balancer /usr/local/bin/rusty-balancer
 COPY configs/container.toml /app/configs/container.toml
