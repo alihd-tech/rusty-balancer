@@ -122,8 +122,7 @@ fn request_host(request: &Request) -> Result<Option<&str>, StatusCode> {
 async fn dispatch(State(runtime): State<Arc<Runtime>>, ConnectInfo(peer): ConnectInfo<SocketAddr>,
     ingress: Option<Extension<HttpsIngress>>, mut request: Request) -> Response {
     let secure = ingress.is_some();
-    let response = dispatch_inner(&runtime, peer, ingress, &mut request).await;
-    let mut response = response;
+    let mut response = dispatch_inner(&runtime, peer, ingress, &mut request).await;
     if runtime.security_headers { balancer_middleware::security_headers(response.headers_mut(), secure); }
     response
 }
@@ -131,7 +130,7 @@ async fn dispatch(State(runtime): State<Arc<Runtime>>, ConnectInfo(peer): Connec
 async fn dispatch_inner(runtime: &Runtime, peer: SocketAddr, ingress: Option<Extension<HttpsIngress>>, request: &mut Request) -> Response {
     let path = request.uri().path();
     if !path.starts_with('/') { return StatusCode::BAD_REQUEST.into_response(); }
-    let raw_host = match request_host(&request) {
+    let raw_host = match request_host(request) {
         Ok(host) => host,
         Err(status) => return status.into_response(),
     };
@@ -277,6 +276,116 @@ static_dir = "{}/../../examples/public"
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 8192).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("Rusty Balancer"));
+    }
+
+    #[tokio::test]
+    async fn route_limits_and_security_headers() {
+        let cfg = Config::parse(r#"
+listen = "127.0.0.1:8080"
+[traffic]
+security_headers = true
+max_in_flight = 1
+[[routes]]
+static_dir = "public"
+[routes.policy]
+allow = ["192.0.2.0/24"]
+max_body_bytes = 4
+[routes.policy.rate_limit]
+requests_per_second = 1
+burst = 1
+max_clients = 10
+"#).unwrap();
+        let server = build(cfg);
+        let request = |peer: &str, body: &'static str| {
+            let mut req = Request::builder().uri("/").method("POST").body(Body::from(body)).unwrap();
+            req.extensions_mut().insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+            req
+        };
+        let response = server.router.clone().oneshot(request("198.51.100.1:1234", "")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        let response = server.router.clone().oneshot(request("192.0.2.1:1234", "12345")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let response = server.router.clone().oneshot(request("192.0.2.1:1235", "")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn websocket_upgrade_relays_frames_and_releases_permit() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::{TcpListener, TcpStream};
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = upstream.local_addr().unwrap();
+        let backend = tokio::spawn(async move {
+            let (stream, _) = upstream.accept().await.unwrap();
+            let mut io = BufReader::new(stream);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                assert!(io.read_line(&mut line).await.unwrap() > 0);
+                if line == "\r\n" { break; }
+            }
+            io.get_mut().write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n").await.unwrap();
+            let mut frame = [0u8; 8];
+            io.read_exact(&mut frame).await.unwrap();
+            assert_eq!(frame, [0x81, 0x82, 1, 2, 3, 4, b'h' ^ 1, b'i' ^ 2]);
+            io.get_mut().write_all(&[0x81, 0x02, b'h', b'i']).await.unwrap();
+        });
+        let cfg = Config::parse(&format!(r#"
+listen = "127.0.0.1:8080"
+[traffic]
+max_in_flight = 1
+[pools.backend]
+[[pools.backend.endpoints]]
+url = "http://{addr}"
+[[routes]]
+pool = "backend"
+[routes.policy]
+websocket = true
+websocket_max_seconds = 5
+"#)).unwrap();
+        let server = build(cfg);
+        let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let router = server.router.clone();
+        let task = tokio::spawn(async move {
+            axum::serve(proxy, router.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+        });
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let mut io = BufReader::new(TcpStream::connect(proxy_addr).await.unwrap());
+            io.get_mut().write_all(b"GET /ws HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").await.unwrap();
+            let mut line = String::new();
+            io.read_line(&mut line).await.unwrap();
+            assert!(line.starts_with("HTTP/1.1 101"));
+            loop {
+                line.clear();
+                assert!(io.read_line(&mut line).await.unwrap() > 0);
+                if line == "\r\n" { break; }
+            }
+            let mut request = Request::builder().uri("/").body(Body::empty()).unwrap();
+            request.extensions_mut().insert(ConnectInfo("192.0.2.1:1234".parse::<SocketAddr>().unwrap()));
+            let blocked = server.router.clone().oneshot(request).await.unwrap();
+            assert_eq!(blocked.status(), StatusCode::SERVICE_UNAVAILABLE);
+            io.get_mut().write_all(&[0x81, 0x82, 1, 2, 3, 4, b'h' ^ 1, b'i' ^ 2]).await.unwrap();
+            let mut echo = [0; 4];
+            io.read_exact(&mut echo).await.unwrap();
+            assert_eq!(echo, [0x81, 0x02, b'h', b'i']);
+            drop(io);
+            backend.await.unwrap();
+            // The backend is closed; a subsequent normal request should reach it and fail with 502,
+            // rather than remain blocked by the tunnel permit.
+            loop {
+                let mut req = Request::builder().uri("/").body(Body::empty()).unwrap();
+                req.extensions_mut().insert(ConnectInfo("192.0.2.1:1234".parse::<SocketAddr>().unwrap()));
+                let response = server.router.clone().oneshot(req).await.unwrap();
+                if response.status() != StatusCode::SERVICE_UNAVAILABLE {
+                    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        task.abort();
     }
 
     #[tokio::test]

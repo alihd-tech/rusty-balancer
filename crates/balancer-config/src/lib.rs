@@ -395,6 +395,15 @@ static_dir = "public"
     }
 
     #[test]
+    fn validates_traffic_example_and_rejects_unbounded_policy() {
+        let source = include_str!("../../../configs/traffic.example.toml");
+        assert!(Config::parse(source).is_ok());
+        assert!(Config::parse(&source.replace("max_clients = 10000", "max_clients = 0")).is_err());
+        assert!(Config::parse(&source.replace("max_body_bytes = 1048576", "max_body_bytes = 999999999")).is_err());
+        assert!(Config::parse(&source.replace("max_entries = 128", "max_entries = 4097")).is_err());
+    }
+
+    #[test]
     fn rejects_invalid_pool() {
         let input = r#"
 listen = "127.0.0.1:8080"

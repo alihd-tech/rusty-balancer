@@ -32,11 +32,16 @@ pub async fn bound_request(req: Request<Body>, policy: &RoutePolicy) -> Result<R
         .and_then(|v| v.parse::<u64>().ok()).is_some_and(|n| n > limit as u64) {
         return Err(StatusCode::PAYLOAD_TOO_LARGE.into_response());
     }
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
     let buffer = tokio::time::timeout(Duration::from_millis(policy.body_timeout_ms.unwrap_or(10000)),
         axum::body::to_bytes(body, limit)).await;
     match buffer {
-        Ok(Ok(bytes)) => Ok(Request::from_parts(parts, Body::from(bytes))),
+        Ok(Ok(bytes)) => {
+            parts.headers.remove(header::TRANSFER_ENCODING);
+            parts.headers.remove(header::TRAILER);
+            parts.headers.remove(header::CONTENT_LENGTH);
+            Ok(Request::from_parts(parts, Body::from(bytes)))
+        },
         Ok(Err(_)) => Err(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
         Err(_) => Err(StatusCode::REQUEST_TIMEOUT.into_response()),
     }

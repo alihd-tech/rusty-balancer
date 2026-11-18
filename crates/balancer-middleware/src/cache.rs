@@ -13,7 +13,7 @@ pub fn eligible(req: &Request<Body>) -> bool {
         !req.headers().keys().any(|h| {
             let n = h.as_str();
             matches!(n, "authorization" | "proxy-authorization" | "cookie" | "range" |
-                "cache-control" | "pragma" | "upgrade" | "expect") || n.starts_with("if-")
+                "cache-control" | "pragma" | "upgrade" | "expect") || n.starts_with("if-") || n.starts_with("sec-websocket-") || n == "connection" && req.headers().get_all("connection").iter().any(|v| v.to_str().map_or(true, |s| s.split(',').any(|x| x.trim().eq_ignore_ascii_case("upgrade"))))
         })
 }
 
@@ -68,8 +68,8 @@ impl Cache {
         let (parts, body) = response.into_parts();
         let bytes = match tokio::time::timeout(deadline, to_bytes(body, self.config.max_body_bytes)).await {
             Ok(Ok(bytes)) => bytes,
-            Ok(Err(_)) => return Response::builder().status(502).body(Body::empty()).unwrap(),
-            Err(_) => return Response::builder().status(504).body(Body::empty()).unwrap(),
+            Ok(Err(_)) => return http::Response::builder().status(502).body(Body::empty()).unwrap(),
+            Err(_) => return http::Response::builder().status(504).body(Body::empty()).unwrap(),
         };
         if at.elapsed() < ttl {
             let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
@@ -88,7 +88,7 @@ mod tests {
     #[tokio::test]
     async fn only_explicit_public_responses_are_cached() {
         let cache = Cache::new(CacheConfig { ttl_seconds: 20, max_entries: 2, max_body_bytes: 100 });
-        let response = |directive: &str| Response::builder()
+        let response = |directive: &str| http::Response::builder()
             .header("date", httpdate::fmt_http_date(SystemTime::now()))
             .header("cache-control", directive).body(Body::from("hello")).unwrap();
         cache.store("private".into(), response("private, max-age=30"), Duration::from_secs(1)).await;
