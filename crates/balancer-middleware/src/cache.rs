@@ -104,6 +104,25 @@ impl Cache {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn purge_invalidates_in_flight_store_epoch() {
+        let cache = Cache::new(CacheConfig { ttl_seconds: 20, max_entries: 2, max_body_bytes: 100 });
+        let response = || http::Response::builder().header("date", httpdate::fmt_http_date(SystemTime::now()))
+            .header("cache-control", "public, max-age=30").body(Body::from("hello")).unwrap();
+        let epoch = cache.epoch();
+        cache.store("before".into(), response(), Duration::from_secs(1), epoch).await;
+        assert_eq!(cache.purge(), 1);
+        cache.store("stale".into(), response(), Duration::from_secs(1), epoch).await;
+        assert!(cache.get("before").is_none());
+        assert!(cache.get("stale").is_none());
+        cache.store("fresh".into(), response(), Duration::from_secs(1), cache.epoch()).await;
+        assert!(cache.get("fresh").is_some());
+        let stats = cache.stats();
+        assert_eq!(stats.entries, 1);
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 2);
+    }
+
+    #[tokio::test]
     async fn only_explicit_public_responses_are_cached() {
         let cache = Cache::new(CacheConfig { ttl_seconds: 20, max_entries: 2, max_body_bytes: 100 });
         let response = |directive: &str| http::Response::builder()

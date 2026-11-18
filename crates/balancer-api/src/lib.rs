@@ -25,7 +25,8 @@ impl Token {
             if meta.permissions().mode() & 0o077 != 0 { bail!("admin token file must be private (chmod 600)"); }
         }
         let mut raw = String::new();
-        file.take(257).read_to_string(&mut raw)?;
+        file.take(259).read_to_string(&mut raw)?;
+        if raw.len() > 258 { bail!("admin token file too large"); }
         let raw = raw.trim_end_matches(['\r','\n']);
         if !(32..=256).contains(&raw.len()) || !raw.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
             bail!("admin token must be 32..=256 URL-safe characters");
@@ -38,10 +39,10 @@ impl Token {
     }
 }
 struct Api { control: Arc<Control>, token: Token, config_path: PathBuf,
-    manual: Option<RustlsConfig>, mutation: tokio::sync::Mutex<()> }
+    manual: Option<RustlsConfig>, mutation: tokio::sync::Mutex<()>, admission: tokio::sync::Semaphore }
 
 pub fn router(control: Arc<Control>, token: Token, config_path: PathBuf, manual: Option<RustlsConfig>) -> Router {
-    let state = Arc::new(Api { control, token, config_path, manual, mutation: tokio::sync::Mutex::new(()) });
+    let state = Arc::new(Api { control, token, config_path, manual, mutation: tokio::sync::Mutex::new(()), admission: tokio::sync::Semaphore::new(8) });
     Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
@@ -66,8 +67,11 @@ async fn authorize(State(api): State<Arc<Api>>, request: Request, next: Next) ->
     let allowed = values.next().is_none() && token.is_some_and(|t| t.len() <= 256 && api.token.matches(t));
     let mut response = if allowed {
         // Bound the full management request including JSON upload. Mutations may finish once started.
-        match tokio::time::timeout(std::time::Duration::from_secs(15), next.run(request)).await {
-            Ok(response) => response, Err(_) => error(StatusCode::REQUEST_TIMEOUT, "management deadline exceeded"),
+        match api.admission.try_acquire() {
+            Ok(_permit) => match tokio::time::timeout(std::time::Duration::from_secs(15), next.run(request)).await {
+                Ok(response) => response, Err(_) => error(StatusCode::REQUEST_TIMEOUT, "management deadline exceeded"),
+            },
+            Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "management capacity reached"),
         }
     } else {
         (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, "Bearer")], Json(json!({"error":"unauthorized"}))).into_response()
@@ -82,7 +86,8 @@ fn revision_result(result: Result<u64>) -> Response {
     match result {
         Ok(revision) => Json(json!({"revision":revision,"persisted":false})).into_response(),
         Err(e) => {
-            tracing::warn!(error = %e, "configuration mutation rejected");
+            let _ = e;
+            tracing::warn!("configuration mutation rejected");
             error(StatusCode::CONFLICT, "configuration rejected; check revision, restart-only fields and server logs")
         }
     }
@@ -181,6 +186,11 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["cache-control"],"no-store");
         assert_eq!(app.oneshot(request(1)).await.unwrap().status(), StatusCode::CONFLICT);
+        assert_eq!(control.current().revision, 2);
+        let app = router(control.clone(), Token(Sha256::digest(secret).into()), "unused".into(), None);
+        let bad = Request::builder().method("PUT").uri("/v1/config").header("authorization",format!("Bearer {secret}"))
+            .header("content-type","application/json").body(Body::from(json!({"expected_revision":2,"toml":"not valid TOML"}).to_string())).unwrap();
+        assert_eq!(app.oneshot(bad).await.unwrap().status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(control.current().revision, 2);
     }
 }

@@ -433,6 +433,14 @@ static_dir = "public"
     }
 
     #[test]
+    fn admin_requires_separate_loopback_listener() {
+        let input = include_str!("../../../configs/admin.example.toml");
+        assert!(Config::parse(input).is_ok());
+        assert!(Config::parse(&input.replace("127.0.0.1:9090", "0.0.0.0:9090")).is_err());
+        assert!(Config::parse(&input.replace("127.0.0.1:9090", "127.0.0.1:8080")).is_err());
+    }
+
+    #[test]
     fn rejects_invalid_pool() {
         let input = r#"
 listen = "127.0.0.1:8080"

@@ -159,6 +159,18 @@ mod tests {
         assert_eq!(control.snapshot().revision, 3);
     }
     #[tokio::test]
+    async fn shared_admission_is_preserved_across_reload() {
+        let cfg = Config::parse("listen = \"127.0.0.1:8080\"\n[traffic]\nmax_in_flight = 1\n[[routes]]\nstatic_dir = \"public\"").unwrap();
+        let control = Control::new(cfg.clone());
+        let permit = control.permits.clone().try_acquire_owned().unwrap();
+        control.apply(1, cfg).unwrap();
+        assert_eq!(control.snapshot().in_flight, 1);
+        assert!(control.current().server.runtime.in_flight.clone().try_acquire_owned().is_err());
+        drop(permit);
+        assert_eq!(control.snapshot().in_flight, 0);
+    }
+
+    #[tokio::test]
     async fn protects_draining_generation() {
         let cfg = Config::parse("listen = \"127.0.0.1:8080\"\n[[routes]]\nstatic_dir = \"public\"").unwrap();
         let control = Control::new(cfg.clone());
