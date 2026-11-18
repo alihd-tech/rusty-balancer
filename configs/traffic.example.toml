@@ -1,0 +1,40 @@
+listen = "127.0.0.1:8080"
+
+[traffic]
+compression = true
+security_headers = true
+max_in_flight = 512
+response_idle_ms = 30000
+
+[pools.app]
+[[pools.app.endpoints]]
+url = "http://127.0.0.1:9001"
+
+[[routes]]
+path_prefix = "/api"
+pool = "app"
+[routes.policy]
+max_body_bytes = 1048576
+body_timeout_ms = 10000
+[routes.policy.rate_limit]
+requests_per_second = 20
+burst = 40
+max_clients = 10000
+
+[[routes]]
+path_prefix = "/ws"
+pool = "app"
+[routes.policy]
+websocket = true
+websocket_max_seconds = 3600
+
+[[routes]]
+path_prefix = "/public"
+pool = "app"
+[routes.policy.cache]
+ttl_seconds = 30
+max_entries = 128
+max_body_bytes = 65536
+
+[[routes]]
+static_dir = "examples/public"

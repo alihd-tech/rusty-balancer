@@ -1,0 +1,13 @@
+[package]
+name = "balancer-middleware"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+[dependencies]
+axum.workspace = true
+balancer-config.workspace = true
+bytes.workspace = true
+http.workspace = true
+http-body.workspace = true
+httpdate.workspace = true
+tokio.workspace = true

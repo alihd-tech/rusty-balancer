@@ -6,14 +6,22 @@ use http::{header, StatusCode, Uri};
 use std::{collections::{BTreeMap, HashSet}, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
-use tower_http::services::ServeDir;
+use tower_http::{services::ServeDir, compression::CompressionLayer};
+use balancer_middleware::{cache::Cache, rate::RateLimiter};
+use tokio::sync::Semaphore;
 
 struct Runtime {
     routes: Vec<RouteConfig>,
     pools: BTreeMap<String, Arc<Pool>>,
     client: HttpClient,
     timeout: Duration,
+    policies: Vec<PolicyRuntime>,
+    in_flight: Arc<Semaphore>,
+    idle: Duration,
+    security_headers: bool,
 }
+
+struct PolicyRuntime { rate: Option<RateLimiter>, cache: Option<Cache> }
 
 pub struct Server {
     pub router: Router,
@@ -40,11 +48,21 @@ pub fn build(config: Config) -> Server {
         }
         pools.insert(name.clone(), pool);
     }
+    let policies = config.routes.iter().map(|r| PolicyRuntime {
+        rate: r.policy.rate_limit.clone().map(RateLimiter::new),
+        cache: r.policy.cache.clone().map(Cache::new),
+    }).collect();
+    let compression = config.traffic.compression;
     let runtime = Arc::new(Runtime {
         routes: config.routes, pools, client,
         timeout: Duration::from_millis(config.upstream_timeout_ms),
+        policies,
+        in_flight: Arc::new(Semaphore::new(config.traffic.max_in_flight)),
+        idle: Duration::from_millis(config.traffic.response_idle_ms),
+        security_headers: config.traffic.security_headers,
     });
     let router = Router::new().fallback(dispatch).with_state(runtime);
+    let router = if compression { router.layer(CompressionLayer::new().gzip(true).br(true).zstd(true).deflate(false)) } else { router };
     Server { router, health_tasks }
 }
 
@@ -103,6 +121,14 @@ fn request_host(request: &Request) -> Result<Option<&str>, StatusCode> {
 
 async fn dispatch(State(runtime): State<Arc<Runtime>>, ConnectInfo(peer): ConnectInfo<SocketAddr>,
     ingress: Option<Extension<HttpsIngress>>, mut request: Request) -> Response {
+    let secure = ingress.is_some();
+    let response = dispatch_inner(&runtime, peer, ingress, &mut request).await;
+    let mut response = response;
+    if runtime.security_headers { balancer_middleware::security_headers(response.headers_mut(), secure); }
+    response
+}
+
+async fn dispatch_inner(runtime: &Runtime, peer: SocketAddr, ingress: Option<Extension<HttpsIngress>>, request: &mut Request) -> Response {
     let path = request.uri().path();
     if !path.starts_with('/') { return StatusCode::BAD_REQUEST.into_response(); }
     let raw_host = match request_host(&request) {
@@ -119,14 +145,47 @@ async fn dispatch(State(runtime): State<Arc<Runtime>>, ConnectInfo(peer): Connec
     let Some(route) = choose_route(&runtime.routes, host.as_deref(), path) else {
         return (StatusCode::NOT_FOUND, "no matching route").into_response();
     };
+    let path = path.to_owned();
+    let forwarded_host = raw_host.map(str::to_owned);
+    let index = runtime.routes.iter().position(|r| std::ptr::eq(r, route)).expect("matched route");
+    let policy = &route.policy;
+    let state = &runtime.policies[index];
+    if !balancer_middleware::allowed(policy, peer.ip()) { return StatusCode::FORBIDDEN.into_response(); }
+    if state.rate.as_ref().is_some_and(|r| !r.admit(peer.ip())) {
+        return (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, "1")]).into_response();
+    }
+    let Ok(permit) = runtime.in_flight.clone().try_acquire_owned() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let request = std::mem::replace(request, Request::new(Body::empty()));
+    let mut request = match balancer_middleware::bound_request(request, policy).await {
+        Ok(request) => request, Err(response) => return response,
+    };
+    let secure = ingress.is_some();
     if let Some(pool) = &route.pool {
-        let forwarded_host = raw_host.map(str::to_owned);
-        return balancer_proxy::forward(&runtime.client, &runtime.pools[pool], request,
-            peer.ip(), forwarded_host, ingress.is_some(), runtime.timeout).await;
+        if request.headers().contains_key(header::UPGRADE) {
+            if !policy.websocket { return StatusCode::NOT_IMPLEMENTED.into_response(); }
+            return balancer_proxy::websocket::forward(&runtime.client, &runtime.pools[pool], request,
+                peer.ip(), forwarded_host, secure, runtime.timeout,
+                Duration::from_secs(policy.websocket_max_seconds.unwrap_or(3600)), permit).await;
+        }
+        let cache_key = state.cache.as_ref().filter(|_| balancer_middleware::cache::eligible(&request))
+            .map(|_| format!("{}|{}|{}", secure, forwarded_host.as_deref().unwrap_or(""),
+                request.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/")));
+        if let (Some(cache), Some(key)) = (&state.cache, &cache_key) {
+            if let Some(response) = cache.get(key) { return balancer_middleware::limits::guard(response, permit, runtime.idle); }
+        }
+        let response = balancer_proxy::forward(&runtime.client, &runtime.pools[pool], request,
+            peer.ip(), forwarded_host, secure, runtime.timeout).await;
+        let response = match (&state.cache, cache_key) {
+            (Some(cache), Some(key)) => cache.store(key, response, runtime.idle).await,
+            _ => response,
+        };
+        return balancer_middleware::limits::guard(response, permit, runtime.idle);
     }
     if let Some(dir) = &route.static_dir {
         // A mounted static directory does not include its route prefix on disk.
-        let suffix = path.strip_prefix(route.path_prefix.as_str()).unwrap_or(path);
+        let suffix = path.strip_prefix(route.path_prefix.as_str()).unwrap_or(path.as_str());
         let mut target = if route.path_prefix == "/" { path.to_owned() }
             else if suffix.is_empty() { "/".to_owned() } else { suffix.to_owned() };
         if let Some(query) = request.uri().query() { target.push('?'); target.push_str(query); }
@@ -146,7 +205,7 @@ async fn dispatch(State(runtime): State<Arc<Runtime>>, ConnectInfo(peer): Connec
                         response.headers_mut().insert(header::LOCATION, location);
                     }
                 }
-                response.map(Body::new)
+                balancer_middleware::limits::guard(response.map(Body::new), permit, runtime.idle)
             },
             Err(never) => match never {},
         };

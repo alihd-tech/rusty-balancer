@@ -1,0 +1,17 @@
+# Traffic policies (P4)
+
+Existing TOML configurations remain valid. The traffic table controls compression (gzip, Brotli, Zstandard selected by Accept-Encoding and Tower's default compression predicate), baseline response headers, maximum concurrent admitted HTTP requests/upgraded tunnels, and response-body idle deadline. The default limit is 1024 and the default idle timeout is 30 seconds. Idle deadlines apply while polling the body, not to socket writes or TLS handshakes. Security headers and compression are off unless enabled. Security headers are applied to dispatch responses, not the separate HTTP redirect listener. HSTS is only emitted on HTTPS.
+
+Each route can configure CIDR allow/deny (deny wins), per-client token buckets, maximum body bytes and a buffering deadline, optionally enable HTTP/1.1 WebSockets, or opt into a conservative in-memory cache. See configs/traffic.example.toml. All IP policy uses the direct TCP peer (IPv4-mapped IPv6 normalized); no incoming forwarded address is trusted. Rate limit state is per process and per route, has a bounded client table and fails closed on saturation. Limits return 403, 429, 413, 408 or 503 as appropriate. Body-limited routes buffer the complete request before forwarding; unconfigured routes retain streaming. Body read errors are reported as 413. The global concurrency limit is not a socket accept/TLS handshake limit.
+
+## Cache
+
+Only enable on routes expressly serving identical public content to all clients. Cache accepts bodyless GET without authorization, cookies, ranges, conditional headers, upgrades or cache directives. Store requires HTTP 200, known bounded body size, a valid Date header, explicit public and max-age only, and no Vary, Set-Cookie, Content-Encoding, Content-Range, challenge or Trailer. Origin freshness and configured TTL cap both apply. Key includes route identity, scheme, original host and path/query. Cache is local, bounded, lazy expiry and oldest insertion eviction; compression happens after cache. It has no distributed invalidation, request collapsing, revalidation, stale serving or mutation-triggered invalidation. Configure short TTLs and never enable on personalized or mutable sensitive endpoints; restart clears state. A backend must accurately describe cacheability and never personalize a public cached response by client IP, implicit credentials or unlisted headers.
+
+## WebSockets
+
+Opt in per proxy route. HTTP/1.1 only; the proxy forwards the standard opening handshake to a selected healthy HTTP/HTTPS upstream, checks the 101 response and accept key, then relays bytes both ways. It holds the upstream lease and global in-flight permit for the tunnel lifetime. Maximum lifetime defaults to one hour, configurable to at most one day. The upstream remains responsible for Origin validation, authentication, subprotocol negotiation and message policy. Non-101 upstream responses currently map to 502. No HTTP/2 extended CONNECT, arbitrary upgrades, WebSocket message inspection, ping generation or per-tunnel idle timer. Process shutdown ends remaining tunnels.
+
+## Remaining hardening
+
+Socket-level connection caps, handshake/header deadlines, write-side backpressure deadlines, trusted proxy configuration, full RFC cache semantics, dynamic policies and operational metrics are not yet implemented. Do not deploy on an untrusted public edge until verification and hardening are complete.

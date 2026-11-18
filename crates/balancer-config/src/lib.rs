@@ -8,6 +8,8 @@ use std::{collections::{BTreeMap, HashSet}, net::SocketAddr, path::{Path, PathBu
 pub struct Config {
     pub listen: SocketAddr,
     pub tls: Option<TlsConfig>,
+    #[serde(default)]
+    pub traffic: TrafficConfig,
     #[serde(default = "timeout_default")]
     pub upstream_timeout_ms: u64,
     #[serde(default)]
@@ -151,6 +153,82 @@ pub struct RouteConfig {
     pub path_prefix: String,
     pub pool: Option<String>,
     pub static_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub policy: RoutePolicy,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TrafficConfig {
+    pub compression: bool,
+    pub security_headers: bool,
+    pub max_in_flight: usize,
+    pub response_idle_ms: u64,
+}
+impl Default for TrafficConfig {
+    fn default() -> Self {
+        Self { compression: false, security_headers: false, max_in_flight: 1024, response_idle_ms: 30000 }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RoutePolicy {
+    pub allow: Vec<ipnet::IpNet>,
+    pub deny: Vec<ipnet::IpNet>,
+    pub max_body_bytes: Option<usize>,
+    pub body_timeout_ms: Option<u64>,
+    pub rate_limit: Option<RateLimitConfig>,
+    pub cache: Option<CacheConfig>,
+    pub websocket: bool,
+    pub websocket_max_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitConfig {
+    pub requests_per_second: u32,
+    pub burst: u32,
+    pub max_clients: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheConfig {
+    pub ttl_seconds: u64,
+    pub max_entries: usize,
+    pub max_body_bytes: usize,
+}
+
+impl RoutePolicy {
+    fn validate(&self, proxy: bool) -> Result<()> {
+        if self.allow.len() + self.deny.len() > 1024 { bail!("too many IP rules"); }
+        if self.max_body_bytes.is_some_and(|n| n == 0 || n > 16 * 1024 * 1024) ||
+            self.body_timeout_ms.is_some_and(|n| n == 0 || n > 300_000) ||
+            (self.body_timeout_ms.is_some() && self.max_body_bytes.is_none()) {
+            bail!("body policy requires max_body_bytes 1..=16777216 and optional timeout 1..=300000");
+        }
+        if let Some(rate) = &self.rate_limit {
+            if !(1..=100_000).contains(&rate.requests_per_second) ||
+                !(1..=100_000).contains(&rate.burst) || !(1..=100_000).contains(&rate.max_clients) {
+                bail!("invalid rate limit bounds");
+            }
+        }
+        if let Some(cache) = &self.cache {
+            if !proxy || !(1..=86400).contains(&cache.ttl_seconds) ||
+                !(1..=4096).contains(&cache.max_entries) ||
+                !(1..=1024*1024).contains(&cache.max_body_bytes) ||
+                cache.max_entries.saturating_mul(cache.max_body_bytes + 16384) > 64 * 1024 * 1024 {
+                bail!("cache requires proxy route and bounded capacity (64 MiB per route)");
+            }
+        }
+        if self.websocket && !proxy { bail!("WebSocket requires a proxy route"); }
+        if self.websocket_max_seconds.is_some_and(|n| n == 0 || n > 86400) ||
+            (self.websocket_max_seconds.is_some() && !self.websocket) {
+            bail!("invalid WebSocket lifetime policy");
+        }
+        Ok(())
+    }
 }
 
 fn root() -> String { "/".into() }
@@ -192,6 +270,12 @@ impl Config {
 
     pub fn validate(&mut self) -> Result<()> {
         if let Some(tls) = &mut self.tls { tls.validate(self.listen)?; }
+        if !(1..=100_000).contains(&self.traffic.max_in_flight) ||
+            !(1..=300_000).contains(&self.traffic.response_idle_ms) {
+            bail!("invalid traffic resource limits");
+        }
+        let mut cache_budget = 0usize;
+        let mut client_budget = 0usize;
         if self.upstream_timeout_ms == 0 || self.upstream_timeout_ms > 300_000 {
             bail!("upstream_timeout_ms must be in 1..=300000");
         }
@@ -223,6 +307,9 @@ impl Config {
         if self.routes.is_empty() { bail!("at least one route is required"); }
         let mut seen = HashSet::new();
         for route in &mut self.routes {
+            route.policy.validate(route.pool.is_some())?;
+            if let Some(c) = &route.policy.cache { cache_budget = cache_budget.saturating_add(c.max_entries.saturating_mul(c.max_body_bytes + 16384)); }
+            if let Some(r) = &route.policy.rate_limit { client_budget = client_budget.saturating_add(r.max_clients); }
             if let Some(host) = &mut route.host {
                 let normalized = hostname(host).context("invalid route host")?;
                 if host.contains('*') { bail!("wildcard hosts are not supported"); }
@@ -241,6 +328,7 @@ impl Config {
                 _ => bail!("route must specify exactly one existing pool or static_dir"),
             }
         }
+        if cache_budget > 128 * 1024 * 1024 || client_budget > 200_000 { bail!("aggregate policy capacity exceeded"); }
         if let Some(tls) = &self.tls {
             let domains = tls.domains();
             if self.routes.iter().filter_map(|r| r.host.as_ref()).any(|host| !domains.contains(host)) {

@@ -1,3 +1,4 @@
+pub mod websocket;
 use axum::{body::Body, response::{IntoResponse, Response}};
 use balancer_config::HealthConfig;
 use balancer_lb::{Endpoint, Lease, Pool};
@@ -27,7 +28,7 @@ fn client_with_roots(roots: rustls::RootCertStore) -> HttpClient {
     Client::builder(TokioExecutor::new()).build(connector)
 }
 
-fn strip_hop_headers(headers: &mut HeaderMap) {
+pub(crate) fn strip_hop_headers(headers: &mut HeaderMap) {
     let nominated: Vec<HeaderName> = headers.get_all(header::CONNECTION).iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(','))
@@ -87,18 +88,7 @@ pub async fn forward(client: &HttpClient, pool: &Pool, mut req: Request<Body>,
     *req.version_mut() = Version::HTTP_11;
     let headers = req.headers_mut();
     strip_hop_headers(headers);
-    // The directly connected client is authoritative. Never trust inbound proxy identity headers.
-    let forwarded: Vec<_> = headers.keys().filter(|n| n.as_str().starts_with("x-forwarded-")
-        || n.as_str() == "forwarded" || n.as_str() == "x-real-ip").cloned().collect();
-    for name in forwarded { headers.remove(name); }
-    headers.insert(header::HOST, upstream_host);
-    if let Ok(value) = HeaderValue::from_str(&peer.to_string()) {
-        headers.insert("x-forwarded-for", value);
-    }
-    headers.insert("x-forwarded-proto", HeaderValue::from_static(if secure { "https" } else { "http" }));
-    if let Some(host) = host.and_then(|h| HeaderValue::from_str(&h).ok()) {
-        headers.insert("x-forwarded-host", host);
-    }
+    forwarding_headers(headers, upstream_host, peer, host, secure);
     match tokio::time::timeout(timeout, client.request(req)).await {
         Ok(Ok(response)) => {
             let (mut parts, body) = response.into_parts();
@@ -110,6 +100,20 @@ pub async fn forward(client: &HttpClient, pool: &Pool, mut req: Request<Body>,
             (StatusCode::BAD_GATEWAY, "upstream unavailable").into_response()
         }
         Err(_) => (StatusCode::GATEWAY_TIMEOUT, "upstream response header timeout").into_response(),
+    }
+}
+
+fn forwarding_headers(headers: &mut HeaderMap, upstream_host: HeaderValue, peer: IpAddr, host: Option<String>, secure: bool) {
+    let forwarded: Vec<_> = headers.keys().filter(|n| n.as_str().starts_with("x-forwarded-")
+        || n.as_str() == "forwarded" || n.as_str() == "x-real-ip").cloned().collect();
+    for name in forwarded { headers.remove(name); }
+    headers.insert(header::HOST, upstream_host);
+    if let Ok(value) = HeaderValue::from_str(&peer.to_string()) {
+        headers.insert("x-forwarded-for", value);
+    }
+    headers.insert("x-forwarded-proto", HeaderValue::from_static(if secure { "https" } else { "http" }));
+    if let Some(host) = host.and_then(|h| HeaderValue::from_str(&h).ok()) {
+        headers.insert("x-forwarded-host", host);
     }
 }
 
