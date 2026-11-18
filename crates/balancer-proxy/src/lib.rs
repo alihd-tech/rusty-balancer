@@ -11,9 +11,13 @@ use std::{net::IpAddr, pin::Pin, sync::Arc, task::{Context, Poll}, time::Duratio
 pub type HttpClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Body>;
 
 pub fn client() -> HttpClient {
+    client_with_roots(rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()))
+}
+
+fn client_with_roots(roots: rustls::RootCertStore) -> HttpClient {
     let mut connector = HttpConnector::new();
+    connector.enforce_http(false);
     connector.set_connect_timeout(Some(Duration::from_secs(5)));
-    let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let tls = rustls::ClientConfig::builder_with_provider(
         Arc::new(rustls::crypto::ring::default_provider()))
         .with_safe_default_protocol_versions().expect("supported TLS versions")
@@ -181,6 +185,40 @@ mod tests {
         assert!(pool.acquire(b"").is_some());
         worker.abort();
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn https_connector_verifies_certificate_and_hostname() {
+        let rcgen::CertifiedKey { cert, key_pair } =
+            rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let der = cert.der().clone();
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(key_pair.serialize_der());
+        let tls = rustls::ServerConfig::builder_with_provider(
+            Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions().unwrap()
+            .with_no_client_auth().with_single_cert(vec![der.clone()], key.into()).unwrap();
+        let config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = axum::Router::new().fallback(|| async { "secure" });
+        let server = axum_server::from_tcp_rustls(listener, config).unwrap();
+        let task = tokio::spawn(async move { server.serve(service.into_make_service()).await.unwrap(); });
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(der).unwrap();
+        let trusted = client_with_roots(roots);
+        async fn request(client: &HttpClient, host: &str, port: u16) -> Result<http::Response<Incoming>, hyper_util::client::legacy::Error> {
+            client.request(Request::builder().uri(format!("https://{host}:{port}/"))
+                .body(Body::empty()).unwrap()).await
+        }
+        let response = tokio::time::timeout(Duration::from_secs(5), request(&trusted, "localhost", port))
+            .await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(tokio::time::timeout(Duration::from_secs(5), request(&trusted, "127.0.0.1", port))
+            .await.unwrap().is_err());
+        assert!(tokio::time::timeout(Duration::from_secs(5), request(&client(), "localhost", port))
+            .await.unwrap().is_err());
+        task.abort();
     }
 
     #[test]

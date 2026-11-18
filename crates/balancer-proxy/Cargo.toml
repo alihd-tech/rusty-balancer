@@ -18,3 +18,7 @@ tracing.workspace = true
 hyper-rustls.workspace = true
 rustls.workspace = true
 webpki-roots.workspace = true
+
+[dev-dependencies]
+axum-server.workspace = true
+rcgen = { version = "0.13", default-features = false, features = ["ring"] }

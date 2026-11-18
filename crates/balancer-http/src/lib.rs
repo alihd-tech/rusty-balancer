@@ -223,7 +223,7 @@ static_dir = "{}/../../examples/public"
     #[tokio::test]
     async fn forwards_path_query_and_replaces_spoofed_header() {
         let upstream = Router::new().fallback(|req: axum::extract::Request| async move {
-            format!("{}|{}", req.uri(), req.headers()["x-forwarded-for"].to_str().unwrap())
+            format!("{}|{}|{}", req.uri(), req.headers()["x-forwarded-for"].to_str().unwrap(), req.headers()["x-forwarded-proto"].to_str().unwrap())
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -244,7 +244,24 @@ pool = "backend"
         let response = server.router.clone().oneshot(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 1024).await.unwrap();
-        assert_eq!(&body[..], b"/api?q=yes|192.0.2.1");
+        assert_eq!(&body[..], b"/api?q=yes|192.0.2.1|http");
+        let tls = Config::parse(r#"
+listen = "127.0.0.1:8080"
+[tls]
+listen = "127.0.0.1:8443"
+[[tls.certificates]]
+domains = ["example.test"]
+cert = "cert.pem"
+key = "key.pem"
+[[routes]]
+static_dir = "public"
+"#).unwrap().tls.unwrap();
+        let mut req = Request::builder().uri("/api?q=yes").header("host", "example.test")
+            .header("x-forwarded-proto", "http").body(Body::empty()).unwrap();
+        req.extensions_mut().insert(ConnectInfo("192.0.2.1:1234".parse::<SocketAddr>().unwrap()));
+        let response = https_router(server.router.clone(), &tls).oneshot(req).await.unwrap();
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], b"/api?q=yes|192.0.2.1|https");
         task.abort();
     }
 }
