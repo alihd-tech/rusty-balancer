@@ -18,7 +18,7 @@ cargo run -- --config configs/tls.example.toml serve
 curl --cacert certs/localhost.crt https://localhost:8443/
 ```
 
-Repeat the [[tls.certificates]] table for different certificates and exact DNS names. The PEM file must contain the leaf first, then intermediates. Keys and named certificates are checked on startup and by validate. Unknown SNI is rejected. Certificate replacement in manual mode requires restarting the process. No wildcard matching or no-SNI default certificate is implemented.
+Repeat the [[tls.certificates]] table for different certificates and exact DNS names. The PEM file must contain the leaf first, then intermediates. Keys and named certificates are checked on startup and by validate. Unknown SNI is rejected. Manual certificate contents can be reloaded through the authenticated management API at existing paths (see [management](management.md)). Changes to names or paths require restart. No wildcard matching or no-SNI default certificate is implemented.
 
 ## Native ACME
 

@@ -8,6 +8,7 @@ use std::{collections::{BTreeMap, HashSet}, net::SocketAddr, path::{Path, PathBu
 pub struct Config {
     pub listen: SocketAddr,
     pub tls: Option<TlsConfig>,
+    pub admin: Option<AdminConfig>,
     #[serde(default)]
     pub traffic: TrafficConfig,
     #[serde(default = "timeout_default")]
@@ -17,7 +18,7 @@ pub struct Config {
     pub routes: Vec<RouteConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
     pub listen: SocketAddr,
@@ -29,7 +30,7 @@ pub struct TlsConfig {
     pub acme: Option<AcmeConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CertificateConfig {
     pub domains: Vec<String>,
@@ -37,7 +38,7 @@ pub struct CertificateConfig {
     pub key: PathBuf,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AcmeConfig {
     pub domains: Vec<String>,
@@ -47,6 +48,15 @@ pub struct AcmeConfig {
     #[serde(default)]
     pub production: bool,
 }
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AdminConfig {
+    pub listen: SocketAddr,
+    pub token_file: PathBuf,
+}
+
+pub const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 
 pub fn is_dns_name(name: &str) -> bool {
     name.len() <= 253 && name.parse::<std::net::IpAddr>().is_err() &&
@@ -257,12 +267,16 @@ fn valid_path(value: &str) -> bool {
 impl Config {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("read {}", path.display()))?;
+        use std::io::Read;
+        let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+        if !file.metadata()?.is_file() { bail!("configuration must be a regular file"); }
+        let mut content = String::new();
+        file.take(MAX_CONFIG_BYTES as u64 + 1).read_to_string(&mut content)?;
         Self::parse(&content)
     }
 
     pub fn parse(content: &str) -> Result<Self> {
+        if content.len() > MAX_CONFIG_BYTES { bail!("configuration exceeds 1 MiB"); }
         let mut config: Self = toml::from_str(content).context("invalid TOML configuration")?;
         config.validate()?;
         Ok(config)
@@ -270,6 +284,21 @@ impl Config {
 
     pub fn validate(&mut self) -> Result<()> {
         if let Some(tls) = &mut self.tls { tls.validate(self.listen)?; }
+        if let Some(admin) = &self.admin {
+            if !admin.listen.ip().is_loopback() || admin.listen.port() == 0 ||
+                admin.listen.port() == self.listen.port() ||
+                self.tls.as_ref().is_some_and(|t| t.listen.port() == admin.listen.port()) ||
+                admin.token_file.as_os_str().is_empty() {
+                bail!("admin listener must be loopback-only with a distinct nonzero port and token file");
+            }
+        }
+        if self.routes.len() > 4096 || self.pools.len() > 256 ||
+            self.pools.values().map(|p| p.endpoints.len()).sum::<usize>() > 2048 {
+            bail!("configuration exceeds route or upstream capacity");
+        }
+        let ring_nodes: u64 = self.pools.values().filter(|p| p.algorithm == Algorithm::ConsistentHash)
+            .flat_map(|p| &p.endpoints).map(|e| u64::from(e.weight) * 64).sum();
+        if ring_nodes > 2_000_000 { bail!("consistent hash ring capacity exceeded"); }
         if !(1..=100_000).contains(&self.traffic.max_in_flight) ||
             !(1..=300_000).contains(&self.traffic.response_idle_ms) {
             bail!("invalid traffic resource limits");

@@ -24,6 +24,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::load(&cli.config)?;
     if let Some(tls) = &config.tls { balancer_tls::validate(tls)?; }
+    let token = config.admin.as_ref().map(|a| balancer_api::Token::load(&a.token_file)).transpose()?;
     if matches!(cli.command, Some(Command::Validate)) {
         println!("configuration is valid");
         return Ok(());
@@ -32,19 +33,31 @@ async fn main() -> Result<()> {
     let tls = config.tls.clone();
     let listener = std::net::TcpListener::bind(address).context("bind HTTP listener")?;
     listener.set_nonblocking(true)?;
-    let server = balancer_http::build(config);
+    let manual = tls.as_ref().map(balancer_tls::manual_handle).transpose()?.flatten();
+    let admin = config.admin.clone();
+    let control = balancer_http::control::Control::new(config);
+    let data_router = control.router();
+    let admin_listener = admin.as_ref().map(|a| -> Result<std::net::TcpListener> {
+        let listener = std::net::TcpListener::bind(a.listen).context("bind management listener")?;
+        listener.set_nonblocking(true)?;
+        Ok(listener)
+    }).transpose()?;
+    let management_app = token.map(|token| balancer_api::router(control, token, cli.config, manual.clone()));
     let http_handle = axum_server::Handle::new();
     let https_handle = axum_server::Handle::new();
+    let admin_handle = axum_server::Handle::new();
+    let admin_shutdown = admin_handle.clone();
     let http_shutdown = http_handle.clone();
     let https_shutdown = https_handle.clone();
     let signal = tokio::spawn(async move {
         shutdown().await;
         http_shutdown.graceful_shutdown(Some(Duration::from_secs(30)));
         https_shutdown.graceful_shutdown(Some(Duration::from_secs(30)));
+        admin_shutdown.graceful_shutdown(Some(Duration::from_secs(30)));
     });
     let app = if let Some(cfg) = &tls {
-        if cfg.redirect_http { balancer_http::redirect_router(cfg) } else { server.router.clone() }
-    } else { server.router.clone() };
+        if cfg.redirect_http { balancer_http::redirect_router(cfg) } else { data_router.clone() }
+    } else { data_router.clone() };
     tracing::info!(address = %listener.local_addr()?, "HTTP listener bound");
     let http = async {
         axum_server::from_tcp(listener)?.handle(http_handle)
@@ -53,12 +66,19 @@ async fn main() -> Result<()> {
     };
     let https = async {
         if let Some(cfg) = tls {
-            let router = balancer_http::https_router(server.router.clone(), &cfg);
-            balancer_tls::serve(cfg, router, https_handle).await?;
+            let router = balancer_http::https_router(data_router.clone(), &cfg);
+            balancer_tls::serve(cfg, router, https_handle, manual).await?;
         }
         Ok::<(), anyhow::Error>(())
     };
-    let result = tokio::try_join!(http, https);
+    let management = async {
+        if let (Some(listener), Some(app)) = (admin_listener, management_app) {
+            tracing::info!(address = %listener.local_addr()?, "management listener bound");
+            axum_server::from_tcp(listener)?.handle(admin_handle).serve(app.into_make_service()).await.context("management server")?;
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+    let result = tokio::try_join!(http, https, management);
     signal.abort();
     result?;
     Ok(())

@@ -86,7 +86,19 @@ pub fn validate(tls: &TlsConfig) -> Result<()> {
     Ok(())
 }
 
-pub async fn serve(tls: TlsConfig, app: Router, handle: Handle<SocketAddr>) -> Result<()> {
+pub fn manual_handle(tls: &TlsConfig) -> Result<Option<RustlsConfig>> {
+    if tls.acme.is_some() { Ok(None) }
+    else { Ok(Some(RustlsConfig::from_config(manual_config(tls)?))) }
+}
+
+pub fn reload_manual(tls: &TlsConfig, handle: &RustlsConfig) -> Result<()> {
+    if tls.acme.is_some() { bail!("ACME certificates renew automatically"); }
+    let config = manual_config(tls)?;
+    handle.reload_from_config(config);
+    Ok(())
+}
+
+pub async fn serve(tls: TlsConfig, app: Router, handle: Handle<SocketAddr>, manual: Option<RustlsConfig>) -> Result<()> {
     let listener = std::net::TcpListener::bind(tls.listen).context("bind HTTPS listener")?;
     listener.set_nonblocking(true)?;
     tracing::info!(address = %listener.local_addr()?, "HTTPS listener bound");
@@ -121,7 +133,7 @@ pub async fn serve(tls: TlsConfig, app: Router, handle: Handle<SocketAddr>) -> R
             .serve(app.into_make_service_with_connect_info::<SocketAddr>()).await
             .context("serve ACME HTTPS")
     } else {
-        let config = RustlsConfig::from_config(manual_config(&tls)?);
+        let config = manual.context("missing manual TLS handle")?;
         axum_server::from_tcp_rustls(listener, config)?.handle(handle)
             .serve(app.into_make_service_with_connect_info::<SocketAddr>()).await
             .context("serve manual HTTPS")

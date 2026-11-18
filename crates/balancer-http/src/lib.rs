@@ -9,6 +9,7 @@ use tower::ServiceExt;
 use tower_http::{services::ServeDir, compression::CompressionLayer};
 use balancer_middleware::{cache::Cache, rate::RateLimiter};
 use tokio::sync::Semaphore;
+pub mod control;
 
 struct Runtime {
     routes: Vec<RouteConfig>,
@@ -25,6 +26,7 @@ struct PolicyRuntime { rate: Option<RateLimiter>, cache: Option<Cache> }
 
 pub struct Server {
     pub router: Router,
+    runtime: Arc<Runtime>,
     health_tasks: Vec<JoinHandle<()>>,
 }
 
@@ -35,6 +37,11 @@ impl Drop for Server {
 }
 
 pub fn build(config: Config) -> Server {
+    let permits = Arc::new(Semaphore::new(config.traffic.max_in_flight));
+    build_with_permits(config, permits)
+}
+
+fn build_with_permits(config: Config, permits: Arc<Semaphore>) -> Server {
     let client = balancer_proxy::client();
     let mut pools = BTreeMap::new();
     let mut health_tasks = Vec::new();
@@ -57,13 +64,13 @@ pub fn build(config: Config) -> Server {
         routes: config.routes, pools, client,
         timeout: Duration::from_millis(config.upstream_timeout_ms),
         policies,
-        in_flight: Arc::new(Semaphore::new(config.traffic.max_in_flight)),
+        in_flight: permits,
         idle: Duration::from_millis(config.traffic.response_idle_ms),
         security_headers: config.traffic.security_headers,
     });
-    let router = Router::new().fallback(dispatch).with_state(runtime);
+    let router = Router::new().fallback(dispatch).with_state(runtime.clone());
     let router = if compression { router.layer(CompressionLayer::new().gzip(true).br(true).zstd(true).deflate(false)) } else { router };
-    Server { router, health_tasks }
+    Server { router, runtime, health_tasks }
 }
 
 fn choose_route<'a>(routes: &'a [RouteConfig], host: Option<&str>, path: &str) -> Option<&'a RouteConfig> {
@@ -171,13 +178,14 @@ async fn dispatch_inner(runtime: &Runtime, peer: SocketAddr, ingress: Option<Ext
         let cache_key = state.cache.as_ref().filter(|_| balancer_middleware::cache::eligible(&request))
             .map(|_| format!("{}|{}|{}", secure, forwarded_host.as_deref().unwrap_or(""),
                 request.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/")));
+        let epoch = state.cache.as_ref().map(Cache::epoch).unwrap_or(0);
         if let (Some(cache), Some(key)) = (&state.cache, &cache_key) {
             if let Some(response) = cache.get(key) { return balancer_middleware::limits::guard(response, permit, runtime.idle); }
         }
         let response = balancer_proxy::forward(&runtime.client, &runtime.pools[pool], request,
             peer.ip(), forwarded_host, secure, runtime.timeout).await;
         let response = match (&state.cache, cache_key) {
-            (Some(cache), Some(key)) => cache.store(key, response, runtime.idle).await,
+            (Some(cache), Some(key)) => cache.store(key, response, runtime.idle, epoch).await,
             _ => response,
         };
         return balancer_middleware::limits::guard(response, permit, runtime.idle);

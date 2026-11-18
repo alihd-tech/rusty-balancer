@@ -11,3 +11,4 @@ http.workspace = true
 http-body.workspace = true
 httpdate.workspace = true
 tokio.workspace = true
+serde.workspace = true

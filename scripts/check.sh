@@ -8,3 +8,5 @@ cargo run -p rusty-balancer -- --config configs/traffic.example.toml validate
 
 # Optional TLS smoke checks: require curl and openssl.
 if [[ "${TLS_SMOKE:-0}" == 1 ]]; then bash scripts/tls-smoke.sh; fi
+
+# Admin example requires a private token file; use the test suite for the API contract.

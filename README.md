@@ -2,7 +2,7 @@
 
 A modular reverse proxy, load balancer and static web server written in Rust. Independent runtime; designed to grow into an infrastructure data plane.
 
-**Development milestone 0.1.0 (P0–P4):** initial implementation, not production-ready. Compilation and test execution are required before release.
+**Development milestone 0.1.0 (P0–P5):** initial implementation, not production-ready. Compilation and test execution are required before release.
 
 ## Quick start
 
@@ -39,6 +39,8 @@ Stop one backend to observe health-check failover after the configured failure t
 | balancer-http | Listener routing, virtual hosts, static files, HTTPS redirects |
 | balancer-tls | Rustls termination, SNI and ACME certificate management |
 | balancer-middleware | CIDR policy, cache, rate and resource limits |
+| balancer-api | Loopback management API |
+| balancer-observability | Metrics and response-header latency |
 | rusty-balancer | CLI, logging and graceful shutdown |
 
 ## Configuration
@@ -57,3 +59,7 @@ cargo clippy --workspace --all-targets
 ```
 
 See [architecture](docs/architecture.md) for behavior and limitations, and [roadmap](docs/roadmap.md) for planned milestones. Do not deploy as a public production edge until hardening and test validation are complete.
+
+## Management
+
+Optional authenticated loopback control plane with revision-checked reload, rollback, metrics, upstream/route inventory, cache purge and manual certificate reload. See [management](docs/management.md).
