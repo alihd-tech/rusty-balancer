@@ -127,3 +127,34 @@ impl TransportConfig {
         Ok(())
     }
 }
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Http3Config {
+    pub listen: SocketAddr,
+    #[serde(default = "h3_connections")]
+    pub max_connections: usize,
+    #[serde(default = "h3_requests")]
+    pub max_requests: usize,
+    #[serde(default = "h3_body")]
+    pub max_body_bytes: usize,
+    #[serde(default = "h3_timeout")]
+    pub request_timeout_ms: u64,
+}
+fn h3_connections()->usize {128}
+fn h3_requests()->usize {64}
+fn h3_body()->usize {1048576}
+fn h3_timeout()->u64 {30000}
+impl Http3Config {
+    pub fn validate(&self,tls:Option<&crate::TlsConfig>,transport:&TransportConfig)->Result<()> {
+        let Some(tls)=tls else{bail!("HTTP/3 requires manual TLS certificates");};
+        if tls.acme.is_some() || self.listen.port()==0 || transport.udp.iter().any(|u|u.listen.port()==self.listen.port()) ||
+            !(1..=512).contains(&self.max_connections) || !(1..=256).contains(&self.max_requests) ||
+            !(1..=4*1024*1024).contains(&self.max_body_bytes) ||
+            self.max_requests.saturating_mul(self.max_body_bytes)>128*1024*1024 ||
+            !(1000..=300000).contains(&self.request_timeout_ms) {
+            bail!("invalid HTTP/3 configuration or resource budget; ACME mode is not yet supported");
+        }
+        Ok(())
+    }
+}

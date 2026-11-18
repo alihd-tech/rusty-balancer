@@ -76,7 +76,9 @@ async fn connection(mut down:TcpStream,peer:SocketAddr,cfg:Arc<TcpService>,defau
         if cfg.proxy_protocol { up.write_all(proxy_line(peer,local).as_bytes()).await?; }
         up.write_all(&prefix).await
     }).await??;
-    relay(down,up,Duration::from_millis(cfg.idle_timeout_ms)).await
+    let result=relay(down,up,Duration::from_millis(cfg.idle_timeout_ms)).await;
+    drop(lease);
+    result
 }
 pub async fn serve(listener:TcpListener,cfg:TcpService,stop:CancellationToken)->Result<()> {
     let default=(!cfg.targets.is_empty()).then(||pool(&cfg.targets,cfg.strategy));

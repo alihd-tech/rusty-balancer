@@ -17,4 +17,5 @@ axum-server.workspace = true
 balancer-tls.workspace = true
 balancer-api.workspace = true
 balancer-transport.workspace = true
+balancer-http3.workspace = true
 tokio-util.workspace = true

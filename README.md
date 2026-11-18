@@ -2,7 +2,7 @@
 
 A modular reverse proxy, load balancer and static web server written in Rust. Independent runtime; designed to grow into an infrastructure data plane.
 
-**Development milestone 0.1.0 (P0–P5):** initial implementation, not production-ready. Compilation and test execution are required before release.
+**Development milestone 0.1.0 (P0–P6):** initial implementation, not production-ready. Compilation and test execution are required before release.
 
 ## Quick start
 
@@ -63,3 +63,7 @@ See [architecture](docs/architecture.md) for behavior and limitations, and [road
 ## Management
 
 Optional authenticated loopback control plane with revision-checked reload, rollback, metrics, upstream/route inventory, cache purge and manual certificate reload. See [management](docs/management.md).
+
+## Network transports
+
+Optional TCP/UDP and experimental HTTP/3 ingress; see [transport configuration](docs/transport.md).

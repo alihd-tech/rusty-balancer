@@ -1,0 +1,21 @@
+[package]
+name = "balancer-http3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+balancer-config.workspace = true
+balancer-tls.workspace = true
+bytes.workspace = true
+h3.workspace = true
+h3-quinn.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tower.workspace = true
+tracing.workspace = true

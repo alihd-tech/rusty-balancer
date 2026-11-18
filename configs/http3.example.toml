@@ -1,0 +1,16 @@
+listen = "127.0.0.1:8080"
+[tls]
+listen = "127.0.0.1:8443"
+redirect_http = true
+[[tls.certificates]]
+domains = ["localhost"]
+cert = "certs/localhost.crt"
+key = "certs/localhost.key"
+[http3]
+listen = "127.0.0.1:8443"
+max_connections = 128
+max_requests = 64
+max_body_bytes = 1048576
+[[routes]]
+host = "localhost"
+static_dir = "examples/public"

@@ -36,8 +36,10 @@ async fn main() -> Result<()> {
     let manual = tls.as_ref().map(balancer_tls::manual_handle).transpose()?.flatten();
     let admin = config.admin.clone();
     let transport = balancer_transport::Bound::bind(config.transport.clone()).await?;
+    let h3 = config.http3.as_ref().map(|h| balancer_http3::Bound::bind(h.clone(), tls.as_ref().expect("validated TLS"))).transpose()?;
     let stop = tokio_util::sync::CancellationToken::new();
     let transport_stop = stop.clone();
+    let h3_stop = stop.clone();
     let control = balancer_http::control::Control::new(config);
     let data_router = control.router();
     let admin_listener = admin.as_ref().map(|a| -> Result<std::net::TcpListener> {
@@ -68,6 +70,8 @@ async fn main() -> Result<()> {
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await.context("HTTP server")
     };
+    let h3_tls = tls.clone();
+    let h3_router = data_router.clone();
     let https = async {
         if let Some(cfg) = tls {
             let router = balancer_http::https_router(data_router.clone(), &cfg);
@@ -82,7 +86,13 @@ async fn main() -> Result<()> {
         }
         Ok::<(), anyhow::Error>(())
     };
-    let result = tokio::try_join!(http, https, management, transport.serve(transport_stop));
+    let http3 = async {
+        if let (Some(h3), Some(cfg)) = (h3, h3_tls) {
+            h3.serve(balancer_http::https_router(h3_router, &cfg), h3_stop).await?;
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+    let result = tokio::try_join!(http, https, management, transport.serve(transport_stop), http3);
     signal.abort();
     result?;
     Ok(())

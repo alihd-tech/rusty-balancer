@@ -13,6 +13,7 @@ pub struct Config {
     pub admin: Option<AdminConfig>,
     #[serde(default)]
     pub transport: transport::TransportConfig,
+    pub http3: Option<transport::Http3Config>,
     #[serde(default)]
     pub traffic: TrafficConfig,
     #[serde(default = "timeout_default")]
@@ -295,6 +296,9 @@ impl Config {
                 admin.token_file.as_os_str().is_empty() {
                 bail!("admin listener must be loopback-only with a distinct nonzero port and token file");
             }
+        }
+        if let Some(h3) = &self.http3 {
+            h3.validate(self.tls.as_ref(), &self.transport)?;
         }
         self.transport.validate(self.listen, self.tls.as_ref().map(|t| t.listen), self.admin.as_ref().map(|a| a.listen))?;
         if self.routes.len() > 4096 || self.pools.len() > 256 ||

@@ -20,7 +20,7 @@ fn server_config(resolver: Arc<dyn ResolvesServerCert>) -> Result<Arc<ServerConf
     Ok(Arc::new(config))
 }
 
-fn manual_config(tls: &TlsConfig) -> Result<Arc<ServerConfig>> {
+pub fn manual_config(tls: &TlsConfig) -> Result<Arc<ServerConfig>> {
     let mut resolver = ResolvesServerCertUsingSni::new();
     for cert in &tls.certificates {
         let mut chain = BufReader::new(File::open(&cert.cert)
