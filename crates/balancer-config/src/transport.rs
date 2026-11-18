@@ -117,7 +117,8 @@ impl TransportConfig {
             if !valid_common(&u.name,u.listen,u.idle_timeout_ms,u.max_lifetime_seconds) ||
                 !names.insert(u.name.clone()) || !udp_ports.insert(u.listen.port()) ||
                 !(1..=1024).contains(&u.max_sessions) || !(512..=16384).contains(&u.max_datagram_bytes) ||
-                u.allow.len()+u.deny.len()>1024 || !valid_targets(&u.targets) {
+                u.allow.len()+u.deny.len()>1024 || !valid_targets(&u.targets) ||
+                (!u.listen.ip().is_loopback() && (u.allow.is_empty() || u.allow.iter().any(|n|n.prefix_len()==0))) {
                 bail!("invalid UDP service {}",u.name);
             }
             if u.strategy == Strategy::ConsistentHash { ring_budget += u.targets.iter().map(|e|u64::from(e.weight)*64).sum::<u64>(); }

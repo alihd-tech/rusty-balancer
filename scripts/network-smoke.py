@@ -14,8 +14,9 @@ def bound(kind):
     s.settimeout(5)
     return s
 
-with bound(socket.SOCK_STREAM) as backend, bound(socket.SOCK_DGRAM) as udp, tempfile.TemporaryDirectory() as directory:
+with bound(socket.SOCK_STREAM) as backend, bound(socket.SOCK_STREAM) as unavailable, bound(socket.SOCK_DGRAM) as udp, tempfile.TemporaryDirectory() as directory:
     backend.listen(2)
+    # The first target is bound but not listening, exercising pre-forward failover.
     def tcp_echo():
         with backend.accept()[0] as conn:
             conn.settimeout(5)
@@ -36,7 +37,7 @@ static_dir = "examples/public"
 name = "tcp"
 listen = "127.0.0.1:{tcp_port}"
 proxy_protocol = true
-targets = [{{address = "127.0.0.1:{backend.getsockname()[1]}"}}]
+targets = [{{address = "127.0.0.1:{unavailable.getsockname()[1]}"}}, {{address = "127.0.0.1:{backend.getsockname()[1]}"}}]
 [[transport.udp]]
 name = "udp"
 listen = "127.0.0.1:{udp_port}"

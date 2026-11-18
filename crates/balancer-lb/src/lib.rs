@@ -72,9 +72,13 @@ impl Pool {
     pub fn endpoints(&self) -> &[Arc<Endpoint>] { &self.endpoints }
 
     pub fn acquire(&self, key: &[u8]) -> Option<Lease> {
+        self.acquire_excluding(key, &std::collections::HashSet::new())
+    }
+
+    pub fn acquire_excluding(&self, key: &[u8], excluded: &std::collections::HashSet<String>) -> Option<Lease> {
         let _guard = self.selection.lock().unwrap_or_else(|e| e.into_inner());
         let candidates: Vec<_> = self.endpoints.iter().enumerate()
-            .filter(|(_, e)| e.is_healthy()).collect();
+            .filter(|(_, e)| e.is_healthy() && !excluded.contains(&e.origin)).collect();
         if candidates.is_empty() { return None; }
         let cursor = self.cursor.fetch_add(1, Ordering::Relaxed);
         let index = match self.algorithm {
@@ -128,6 +132,13 @@ mod tests {
         assert_eq!(p.acquire(b"").unwrap().endpoint().origin, "http://b");
         p.endpoints()[1].set_healthy(false);
         assert!(p.acquire(b"").is_none());
+    }
+    #[test]
+    fn connection_retry_exclusion_preserves_health() {
+        let p = pool(Algorithm::RoundRobin);
+        let excluded = std::collections::HashSet::from(["http://a".to_string()]);
+        assert_eq!(p.acquire_excluding(b"", &excluded).unwrap().endpoint().origin, "http://b");
+        assert!(p.endpoints()[0].is_healthy());
     }
     #[test]
     fn weighted_distribution() {

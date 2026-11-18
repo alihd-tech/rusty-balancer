@@ -1,8 +1,8 @@
 use super::{allowed,pool};
 use anyhow::{bail,Context,Result};
 use balancer_config::transport::TcpService;
-use balancer_lb::Pool;
-use std::{collections::HashMap,io::Cursor,net::SocketAddr,sync::{Arc,Mutex},time::{Duration,Instant}};
+use balancer_lb::{Lease,Pool};
+use std::{collections::{HashMap,HashSet},io::Cursor,net::SocketAddr,sync::{Arc,Mutex},time::{Duration,Instant}};
 use tokio::{io::{AsyncRead,AsyncReadExt,AsyncWrite,AsyncWriteExt},net::{TcpListener,TcpStream},sync::Semaphore,task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -60,6 +60,20 @@ async fn relay(mut down:TcpStream,mut up:TcpStream,idle:Duration)->Result<()> {
     }
     Ok(())
 }
+async fn connect_upstream(pool:&Pool,peer:SocketAddr,deadline:Duration)->Result<(TcpStream,Lease)> {
+    let mut excluded=HashSet::new();
+    let end=tokio::time::Instant::now()+deadline;
+    // Retry establishment only, before forwarding client bytes.
+    for _ in 0..3 {
+        let Some(lease)=pool.acquire_excluding(peer.ip().to_string().as_bytes(),&excluded) else{break;};
+        let addr:SocketAddr=lease.endpoint().origin.parse()?;
+        let attempt=(tokio::time::Instant::now()+Duration::from_millis(1500)).min(end);
+        if let Ok(Ok(stream))=tokio::time::timeout_at(attempt,TcpStream::connect(addr)).await {return Ok((stream,lease));}
+        excluded.insert(lease.endpoint().origin.clone());
+        if tokio::time::Instant::now()>=end {break;}
+    }
+    bail!("all attempted TCP targets unavailable")
+}
 async fn connection(mut down:TcpStream,peer:SocketAddr,cfg:Arc<TcpService>,default:Option<Arc<Pool>>,routes:Arc<HashMap<String,Arc<Pool>>>)->Result<()> {
     let local=down.local_addr()?;
     let deadline=Duration::from_millis(cfg.connect_timeout_ms);
@@ -68,9 +82,7 @@ async fn connection(mut down:TcpStream,peer:SocketAddr,cfg:Arc<TcpService>,defau
             let (host,prefix)=tokio::time::timeout(deadline,client_hello(&mut down)).await??;
             (routes.get(&host).cloned().or(default).context("unmatched TLS SNI")?,prefix)
         };
-    let lease=selected.acquire(peer.ip().to_string().as_bytes()).context("no TCP upstream")?;
-    let addr:SocketAddr=lease.endpoint().origin.parse()?;
-    let mut up=tokio::time::timeout(deadline,TcpStream::connect(addr)).await??;
+    let (mut up,lease)=connect_upstream(&selected,peer,deadline).await?;
     up.set_nodelay(true)?;down.set_nodelay(true)?;
     tokio::time::timeout(deadline,async {
         if cfg.proxy_protocol { up.write_all(proxy_line(peer,local).as_bytes()).await?; }
