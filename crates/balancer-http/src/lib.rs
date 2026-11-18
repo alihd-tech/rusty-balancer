@@ -84,14 +84,28 @@ async fn dispatch(State(runtime): State<Arc<Runtime>>, ConnectInfo(peer): Connec
     }
     if let Some(dir) = &route.static_dir {
         // A mounted static directory does not include its route prefix on disk.
-        let suffix = path.strip_prefix(&route.path_prefix).unwrap_or(path);
+        let suffix = path.strip_prefix(route.path_prefix.as_str()).unwrap_or(path);
         let mut target = if route.path_prefix == "/" { path.to_owned() }
             else if suffix.is_empty() { "/".to_owned() } else { suffix.to_owned() };
         if let Some(query) = request.uri().query() { target.push('?'); target.push_str(query); }
         let Ok(uri) = target.parse::<Uri>() else { return StatusCode::BAD_REQUEST.into_response(); };
         *request.uri_mut() = uri;
         return match ServeDir::new(dir).oneshot(request).await {
-            Ok(response) => response.map(Body::new),
+            Ok(mut response) => {
+                // ServeDir redirects directory requests to a trailing slash.
+                // Preserve the external mount prefix in root-relative redirects.
+                if route.path_prefix != "/" {
+                    let location = response.headers().get(header::LOCATION)
+                        .and_then(|value| value.to_str().ok())
+                        .filter(|value| value.starts_with('/') && !value.starts_with("//"))
+                        .and_then(|value| http::HeaderValue::from_str(
+                            &format!("{}{value}", route.path_prefix)).ok());
+                    if let Some(location) = location {
+                        response.headers_mut().insert(header::LOCATION, location);
+                    }
+                }
+                response.map(Body::new)
+            },
             Err(never) => match never {},
         };
     }
@@ -122,6 +136,24 @@ static_dir = "api"
         assert_eq!(choose_route(&cfg.routes, Some("example.test"), "/apix").unwrap().path_prefix, "/");
         assert!(choose_route(&cfg.routes, Some("other.test"), "/api").unwrap().host.is_none());
     }
+    #[tokio::test]
+    async fn serves_static_files_from_a_mount() {
+        let cfg = Config::parse(&format!(r#"
+listen = "127.0.0.1:8080"
+[[routes]]
+path_prefix = "/assets"
+static_dir = "{}/../../examples/public"
+"#, env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let server = build(cfg);
+        let mut req = Request::builder().uri("/assets/index.html")
+            .header("host", "example.test").body(Body::empty()).unwrap();
+        req.extensions_mut().insert(ConnectInfo("192.0.2.1:1234".parse::<SocketAddr>().unwrap()));
+        let response = server.router.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 8192).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("Rusty Balancer"));
+    }
+
     #[tokio::test]
     async fn forwards_path_query_and_replaces_spoofed_header() {
         let upstream = Router::new().fallback(|req: axum::extract::Request| async move {

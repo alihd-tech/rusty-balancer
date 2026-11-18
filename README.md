@@ -14,14 +14,20 @@ cargo run -p rusty-balancer -- serve
 curl http://127.0.0.1:8080/
 ```
 
-Start two local HTTP backends on ports 9001 and 9002 before testing the proxy. For a simple demonstration run in two separate terminals from the repo root:
+Start two demo HTTP backends in separate terminals:
 
 ```sh
-python3 -m http.server 9001 --bind 127.0.0.1 --directory examples/public
-python3 -m http.server 9002 --bind 127.0.0.1 --directory examples/public
+python3 scripts/demo-backend.py --port 9001
+python3 scripts/demo-backend.py --port 9002
 ```
 
-Requests to /api retain the prefix when forwarded, so these sample backends return 404 unless you create an api resource. Health checks use /, which returns 200. Use a backend exposing /api for successful proxy responses, or set the route prefix to / in a separate proxy-only configuration.
+With Rusty Balancer running, inspect weighted routing:
+
+```sh
+for i in 1 2 3 4 5 6; do curl -s http://127.0.0.1:8080/api; echo; done
+```
+
+Stop one backend to observe health-check failover after the configured failure threshold.
 
 ## Components
 
@@ -37,7 +43,7 @@ Requests to /api retain the prefix when forwarded, so these sample backends retu
 
 See [configs/balancer.toml](configs/balancer.toml). Supported algorithms: round_robin, weighted_round_robin, least_connections, consistent_hash. For virtual hosts add a host field to a route. Health checks are optional and use GET with configurable intervals, timeouts and consecutive-result thresholds. All unhealthy pools return HTTP 503.
 
-Inbound HTTP/1.1 and cleartext HTTP/2 prior knowledge; HTTP/1.1 upstreams. TLS and WebSockets are planned, not implemented. Default listener is loopback. To run in Docker with published ports, supply a config listening on 0.0.0.0:8080 and reachable upstreams; localhost inside a container refers to that container.
+Inbound HTTP/1.1 and cleartext HTTP/2 prior knowledge; HTTP/1.1 upstreams. TLS and WebSockets are planned, not implemented. Default development listener is loopback. The Docker image uses a static-only container config listening on 0.0.0.0:8080; mount a custom config for accessible upstreams. Localhost inside a container refers to that container. Publish the example only on loopback: docker run --rm -p 127.0.0.1:8080:8080 rusty-balancer.
 
 ## Development
 

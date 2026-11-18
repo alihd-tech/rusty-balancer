@@ -137,6 +137,45 @@ pub async fn health_worker(client: HttpClient, endpoint: Arc<Endpoint>, config: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn active_health_detects_failure_and_recovery() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let healthy = Arc::new(AtomicBool::new(true));
+        let flag = healthy.clone();
+        let router = axum::Router::new().fallback(move || {
+            let flag = flag.clone();
+            async move {
+                if flag.load(Ordering::Relaxed) { StatusCode::OK }
+                else { StatusCode::SERVICE_UNAVAILABLE }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+        let pool = Pool::new(&balancer_config::PoolConfig {
+            algorithm: balancer_config::Algorithm::RoundRobin,
+            endpoints: vec![balancer_config::EndpointConfig { url: format!("http://{addr}"), weight: 1 }],
+            health: None,
+        });
+        let endpoint = Arc::clone(&pool.endpoints()[0]);
+        let worker = tokio::spawn(health_worker(client(), endpoint.clone(), HealthConfig {
+            path: "/health".into(), interval_ms: 50, timeout_ms: 50,
+            healthy_threshold: 1, unhealthy_threshold: 1,
+        }));
+        healthy.store(false, Ordering::Relaxed);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while endpoint.is_healthy() { tokio::time::sleep(Duration::from_millis(10)).await; }
+        }).await.unwrap();
+        assert!(pool.acquire(b"").is_none());
+        healthy.store(true, Ordering::Relaxed);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !endpoint.is_healthy() { tokio::time::sleep(Duration::from_millis(10)).await; }
+        }).await.unwrap();
+        assert!(pool.acquire(b"").is_some());
+        worker.abort();
+        server.abort();
+    }
+
     #[test]
     fn strips_connection_nominated_headers() {
         let mut h = HeaderMap::new();
