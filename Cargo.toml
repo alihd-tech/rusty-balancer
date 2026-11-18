@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/balancer-config",
+  "crates/balancer-lb",
+  "crates/balancer-proxy",
+  "crates/balancer-http",
+  "crates/balancer-cli",
+]
+default-members = ["crates/balancer-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+
+[workspace.dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["http2"] }
+bytes = "1"
+clap = { version = "4.5", features = ["derive"] }
+http = "1"
+http-body = "1"
+hyper = { version = "1", features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+balancer-config = { path = "crates/balancer-config" }
+balancer-lb = { path = "crates/balancer-lb" }
+balancer-proxy = { path = "crates/balancer-proxy" }
+balancer-http = { path = "crates/balancer-http" }
+
+[profile.release]
+lto = "thin"

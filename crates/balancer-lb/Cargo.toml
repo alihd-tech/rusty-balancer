@@ -1,0 +1,8 @@
+[package]
+name = "balancer-lb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+balancer-config.workspace = true

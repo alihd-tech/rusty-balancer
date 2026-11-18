@@ -1,0 +1,9 @@
+# Architecture
+
+The CLI loads and validates TOML before binding a listener. The HTTP crate dispatches by exact hostname first, then longest segment-boundary path prefix. Each route points to a static directory or an upstream pool. Requests to a pool keep their original path and query. Static mounts strip the configured prefix.
+
+The proxy streams request and response bodies with Hyper and reuses pooled upstream connections. It rewrites Host to the selected origin, removes connection-specific headers, and rebuilds forwarding identity headers using the direct TCP peer. No automatic request replay is performed, including after a connection failure. Upstream request timeout covers obtaining response headers, not the entire response body.
+
+The load-balancing crate owns health eligibility and per-endpoint in-flight HTTP request counters (held until the response body finishes or is dropped). Least-connections is weighted by configured endpoint capacity; consistent hashing uses a weighted virtual-node ring keyed on the immediate client's IP. Health checks run concurrently per endpoint and transition eligibility after configured consecutive successes/failures. Endpoints start eligible; readiness gating and passive failure ejection are future work. Failover selects a healthy endpoint for subsequent requests, not a retry of an already forwarded request.
+
+P0–P2 are a development baseline, not a hardened public edge. Inbound HTTP/1.1 and cleartext HTTP/2 prior knowledge are supported by Axum's server; upstream HTTP/1.1 is intentional for this milestone. TLS, secure trust boundaries for existing proxies, upgrades, CONNECT, request rate limits, streaming idle deadlines, bounded shutdown and dynamic reload are future work. Never expose this baseline to untrusted public traffic. Only configure trusted upstream origins and static roots without links to sensitive files. Relative static paths resolve from the working directory.
