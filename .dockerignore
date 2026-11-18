@@ -2,3 +2,8 @@ target
 .git
 .env
 configs/local.toml
+
+certs
+state
+*.key
+*.pem

@@ -1,9 +1,9 @@
-use axum::{body::Body, extract::{ConnectInfo, Request, State}, response::{IntoResponse, Response}, Router};
-use balancer_config::{hostname, path_matches, Config, RouteConfig};
+use axum::{body::Body, extract::{ConnectInfo, Request, State}, Extension, response::{IntoResponse, Response}, Router};
+use balancer_config::{hostname, path_matches, Config, RouteConfig, TlsConfig};
 use balancer_lb::Pool;
 use balancer_proxy::HttpClient;
 use http::{header, StatusCode, Uri};
-use std::{collections::BTreeMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::{BTreeMap, HashSet}, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
 use tower_http::services::ServeDir;
@@ -54,33 +54,75 @@ fn choose_route<'a>(routes: &'a [RouteConfig], host: Option<&str>, path: &str) -
     }).max_by_key(|r| (r.host.is_some(), r.path_prefix.len()))
 }
 
-async fn dispatch(State(runtime): State<Arc<Runtime>>, ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    mut request: Request) -> Response {
-    let path = request.uri().path();
-    if !path.starts_with('/') { return StatusCode::BAD_REQUEST.into_response(); }
+#[derive(Clone)]
+struct HttpsIngress(Arc<HashSet<String>>);
+
+pub fn https_router(router: Router, tls: &TlsConfig) -> Router {
+    router.layer(Extension(HttpsIngress(Arc::new(tls.domains().into_iter().collect()))))
+}
+
+// Only validated, canonical configured names may appear in redirect Locations.
+pub fn redirect_router(tls: &TlsConfig) -> Router {
+    let domains: Arc<HashSet<String>> = Arc::new(tls.domains().into_iter().collect());
+    let port = tls.external_port();
+    Router::new().fallback(move |request: Request| {
+        let domains = domains.clone();
+        async move {
+            if request.method() == http::Method::CONNECT || !request.uri().path().starts_with('/') {
+                return StatusCode::BAD_REQUEST.into_response();
+            }
+            let host = match request_host(&request) {
+                Ok(Some(raw)) => hostname(raw),
+                _ => None,
+            };
+            let Some(host) = host.filter(|h| domains.contains(h)) else {
+                return StatusCode::MISDIRECTED_REQUEST.into_response();
+            };
+            let authority = if port == 443 { host } else { format!("{host}:{port}") };
+            let path = request.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+            let location = format!("https://{authority}{path}");
+            match http::HeaderValue::from_str(&location) {
+                Ok(value) => (StatusCode::PERMANENT_REDIRECT, [(header::LOCATION, value)]).into_response(),
+                Err(_) => StatusCode::BAD_REQUEST.into_response(),
+            }
+        }
+    })
+}
+
+fn request_host(request: &Request) -> Result<Option<&str>, StatusCode> {
     let authority = request.uri().authority().map(|a| a.as_str());
     let mut values = request.headers().get_all(header::HOST).iter();
-    let host_header = match values.next() {
-        Some(value) => match value.to_str() {
-            Ok(value) => Some(value),
-            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
-        },
-        None => None,
-    };
-    if values.next().is_some() { return StatusCode::BAD_REQUEST.into_response(); }
+    let host_header = values.next().map(|v| v.to_str()).transpose()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if values.next().is_some() { return Err(StatusCode::BAD_REQUEST); }
     if let (Some(a), Some(b)) = (authority, host_header) {
-        if !a.eq_ignore_ascii_case(b) { return StatusCode::BAD_REQUEST.into_response(); }
+        if !a.eq_ignore_ascii_case(b) { return Err(StatusCode::BAD_REQUEST); }
     }
-    let raw_host = authority.or(host_header);
+    Ok(authority.or(host_header))
+}
+
+async fn dispatch(State(runtime): State<Arc<Runtime>>, ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ingress: Option<Extension<HttpsIngress>>, mut request: Request) -> Response {
+    let path = request.uri().path();
+    if !path.starts_with('/') { return StatusCode::BAD_REQUEST.into_response(); }
+    let raw_host = match request_host(&request) {
+        Ok(host) => host,
+        Err(status) => return status.into_response(),
+    };
     let host = raw_host.and_then(hostname);
     if raw_host.is_some() && host.is_none() { return StatusCode::BAD_REQUEST.into_response(); }
+    if let Some(Extension(https)) = &ingress {
+        if !host.as_ref().is_some_and(|host| https.0.contains(host)) {
+            return StatusCode::MISDIRECTED_REQUEST.into_response();
+        }
+    }
     let Some(route) = choose_route(&runtime.routes, host.as_deref(), path) else {
         return (StatusCode::NOT_FOUND, "no matching route").into_response();
     };
     if let Some(pool) = &route.pool {
         let forwarded_host = raw_host.map(str::to_owned);
         return balancer_proxy::forward(&runtime.client, &runtime.pools[pool], request,
-            peer.ip(), forwarded_host, runtime.timeout).await;
+            peer.ip(), forwarded_host, ingress.is_some(), runtime.timeout).await;
     }
     if let Some(dir) = &route.static_dir {
         // A mounted static directory does not include its route prefix on disk.
@@ -136,6 +178,30 @@ static_dir = "api"
         assert_eq!(choose_route(&cfg.routes, Some("example.test"), "/apix").unwrap().path_prefix, "/");
         assert!(choose_route(&cfg.routes, Some("other.test"), "/api").unwrap().host.is_none());
     }
+    #[tokio::test]
+    async fn redirect_preserves_path_and_rejects_unknown_host() {
+        let cfg = Config::parse(r#"
+listen = "127.0.0.1:8080"
+[tls]
+listen = "127.0.0.1:8443"
+redirect_http = true
+[[tls.certificates]]
+domains = ["example.test"]
+cert = "cert.pem"
+key = "key.pem"
+[[routes]]
+static_dir = "public"
+"#).unwrap();
+        let app = redirect_router(cfg.tls.as_ref().unwrap());
+        let response = app.clone().oneshot(Request::builder().uri("/a?q=1")
+            .method("POST").header("host", "EXAMPLE.TEST:8080").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(response.headers()[header::LOCATION], "https://example.test:8443/a?q=1");
+        let response = app.oneshot(Request::builder().uri("/").header("host", "attacker.test")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::MISDIRECTED_REQUEST);
+    }
+
     #[tokio::test]
     async fn serves_static_files_from_a_mount() {
         let cfg = Config::parse(&format!(r#"

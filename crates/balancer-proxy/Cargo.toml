@@ -15,3 +15,6 @@ hyper.workspace = true
 hyper-util.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+hyper-rustls.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true

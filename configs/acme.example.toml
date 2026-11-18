@@ -1,0 +1,17 @@
+# Replace the example domain, email and bind addresses for your deployment.
+# Public TCP 443 must reach the TLS listener directly for TLS-ALPN-01.
+listen = "127.0.0.1:8080"
+[tls]
+listen = "127.0.0.1:8443"
+public_port = 443
+redirect_http = true
+
+[tls.acme]
+domains = ["example.org"]
+email = "admin@example.org"
+cache_dir = "state/acme-staging"
+production = false
+
+[[routes]]
+host = "example.org"
+static_dir = "examples/public"

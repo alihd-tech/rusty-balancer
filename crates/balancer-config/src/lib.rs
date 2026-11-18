@@ -7,11 +7,99 @@ use std::{collections::{BTreeMap, HashSet}, net::SocketAddr, path::{Path, PathBu
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub listen: SocketAddr,
+    pub tls: Option<TlsConfig>,
     #[serde(default = "timeout_default")]
     pub upstream_timeout_ms: u64,
     #[serde(default)]
     pub pools: BTreeMap<String, PoolConfig>,
     pub routes: Vec<RouteConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsConfig {
+    pub listen: SocketAddr,
+    #[serde(default)]
+    pub redirect_http: bool,
+    pub public_port: Option<u16>,
+    #[serde(default)]
+    pub certificates: Vec<CertificateConfig>,
+    pub acme: Option<AcmeConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CertificateConfig {
+    pub domains: Vec<String>,
+    pub cert: PathBuf,
+    pub key: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcmeConfig {
+    pub domains: Vec<String>,
+    pub email: String,
+    pub cache_dir: PathBuf,
+    // Staging is deliberately the default.
+    #[serde(default)]
+    pub production: bool,
+}
+
+pub fn is_dns_name(name: &str) -> bool {
+    name.len() <= 253 && name.parse::<std::net::IpAddr>().is_err() &&
+        name.split('.').all(|label| !label.is_empty() && label.len() <= 63 &&
+            !label.starts_with('-') && !label.ends_with('-') &&
+            label.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'))
+}
+
+impl TlsConfig {
+    pub fn domains(&self) -> Vec<String> {
+        if let Some(acme) = &self.acme { return acme.domains.clone(); }
+        self.certificates.iter().flat_map(|cert| cert.domains.clone()).collect()
+    }
+
+    pub fn external_port(&self) -> u16 {
+        self.public_port.unwrap_or(self.listen.port())
+    }
+
+    fn validate(&mut self, http: SocketAddr) -> Result<()> {
+        if self.listen.port() == 0 || self.external_port() == 0 || self.listen == http {
+            bail!("TLS requires a distinct listener and nonzero ports");
+        }
+        if self.certificates.is_empty() == self.acme.is_none() {
+            bail!("TLS requires exactly one mode: manual certificates or ACME");
+        }
+        let mut seen = HashSet::new();
+        let mut normalize = |domains: &mut Vec<String>| -> Result<()> {
+            if domains.is_empty() { bail!("TLS certificate requires at least one DNS name"); }
+            for name in domains {
+                *name = name.to_ascii_lowercase();
+                if !is_dns_name(name) || !seen.insert(name.clone()) {
+                    bail!("invalid or duplicate TLS DNS name: {name}");
+                }
+            }
+            Ok(())
+        };
+        for cert in &mut self.certificates {
+            normalize(&mut cert.domains)?;
+            if cert.cert.as_os_str().is_empty() || cert.key.as_os_str().is_empty() {
+                bail!("certificate and private key paths are required");
+            }
+        }
+        if let Some(acme) = &mut self.acme {
+            normalize(&mut acme.domains)?;
+            if acme.domains.len() > 100 || acme.domains.iter().any(|d| !d.contains('.')) {
+                bail!("ACME requires 1..=100 fully qualified DNS names");
+            }
+            if !acme.email.contains('@') || acme.email.chars().any(char::is_whitespace) ||
+                acme.cache_dir.as_os_str().is_empty() {
+                bail!("ACME requires a contact email and private cache directory");
+            }
+            if self.external_port() != 443 { bail!("TLS-ALPN-01 requires external port 443"); }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -103,6 +191,7 @@ impl Config {
     }
 
     pub fn validate(&mut self) -> Result<()> {
+        if let Some(tls) = &mut self.tls { tls.validate(self.listen)?; }
         if self.upstream_timeout_ms == 0 || self.upstream_timeout_ms > 300_000 {
             bail!("upstream_timeout_ms must be in 1..=300000");
         }
@@ -114,12 +203,12 @@ impl Config {
             for endpoint in &mut pool.endpoints {
                 let uri: Uri = endpoint.url.parse().context("invalid upstream URL")?;
                 let Some(authority) = uri.authority() else { bail!("missing upstream authority"); };
-                if uri.scheme_str() != Some("http") || uri.path() != "/" ||
+                if !matches!(uri.scheme_str(), Some("http" | "https")) || uri.path() != "/" ||
                     uri.query().is_some() || authority.as_str().contains('@') ||
                     endpoint.url.contains('#') || endpoint.weight == 0 || endpoint.weight > 100 {
-                    bail!("pool {name}: endpoints must be HTTP origins with weight 1..=100");
+                    bail!("pool {name}: endpoints must be HTTP(S) origins with weight 1..=100");
                 }
-                endpoint.url = format!("http://{}", authority.as_str().to_ascii_lowercase());
+                endpoint.url = format!("{}://{}", uri.scheme_str().unwrap(), authority.as_str().to_ascii_lowercase());
                 if !seen.insert(endpoint.url.clone()) { bail!("pool {name}: duplicate endpoint"); }
             }
             if let Some(health) = &pool.health {
@@ -152,6 +241,12 @@ impl Config {
                 _ => bail!("route must specify exactly one existing pool or static_dir"),
             }
         }
+        if let Some(tls) = &self.tls {
+            let domains = tls.domains();
+            if self.routes.iter().filter_map(|r| r.host.as_ref()).any(|host| !domains.contains(host)) {
+                bail!("every named route must be covered by an explicitly configured TLS domain");
+            }
+        }
         Ok(())
     }
 }
@@ -166,6 +261,51 @@ mod tests {
         assert!(!path_matches("/api", "/apix"));
         assert_eq!(hostname("Example.COM:8080").as_deref(), Some("example.com"));
     }
+    #[test]
+    fn tls_modes_and_https_origins() {
+        let input = r#"
+listen = "127.0.0.1:8080"
+[tls]
+listen = "127.0.0.1:8443"
+[[tls.certificates]]
+domains = ["EXAMPLE.TEST"]
+cert = "cert.pem"
+key = "key.pem"
+[pools.backend]
+[[pools.backend.endpoints]]
+url = "https://example.org"
+[[routes]]
+host = "example.test"
+pool = "backend"
+"#;
+        let config = Config::parse(input).unwrap();
+        assert_eq!(config.tls.unwrap().domains(), vec!["example.test"]);
+        assert_eq!(config.pools["backend"].endpoints[0].url, "https://example.org");
+        assert!(Config::parse(&input.replace("EXAMPLE.TEST", "*.example.test")).is_err());
+        assert!(Config::parse(&input.replace("8443", "8080")).is_err());
+        assert!(Config::parse(&input.replace("EXAMPLE.TEST", "other.test")).is_err());
+        assert!(Config::parse(&input.replace("https://", "ftp://")).is_err());
+    }
+
+    #[test]
+    fn acme_requires_public_443_and_defaults_to_staging() {
+        let input = r#"
+listen = "127.0.0.1:8080"
+[tls]
+listen = "127.0.0.1:8443"
+public_port = 443
+[tls.acme]
+domains = ["example.org"]
+email = "admin@example.org"
+cache_dir = "state/acme"
+[[routes]]
+host = "example.org"
+static_dir = "public"
+"#;
+        assert!(!Config::parse(input).unwrap().tls.unwrap().acme.unwrap().production);
+        assert!(Config::parse(&input.replace("public_port = 443", "public_port = 8443")).is_err());
+    }
+
     #[test]
     fn rejects_invalid_pool() {
         let input = r#"

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use balancer_config::Config;
 use clap::{Parser, Subcommand};
-use std::{net::SocketAddr, path::PathBuf};
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -23,15 +23,44 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     let config = Config::load(&cli.config)?;
+    if let Some(tls) = &config.tls { balancer_tls::validate(tls)?; }
     if matches!(cli.command, Some(Command::Validate)) {
         println!("configuration is valid");
         return Ok(());
     }
-    let listener = tokio::net::TcpListener::bind(config.listen).await.context("bind listener")?;
+    let address = config.listen;
+    let tls = config.tls.clone();
+    let listener = std::net::TcpListener::bind(address).context("bind HTTP listener")?;
+    listener.set_nonblocking(true)?;
     let server = balancer_http::build(config);
-    tracing::info!(address = %listener.local_addr()?, "Rusty Balancer started");
-    axum::serve(listener, server.router.clone().into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(shutdown()).await.context("HTTP server")?;
+    let http_handle = axum_server::Handle::new();
+    let https_handle = axum_server::Handle::new();
+    let http_shutdown = http_handle.clone();
+    let https_shutdown = https_handle.clone();
+    let signal = tokio::spawn(async move {
+        shutdown().await;
+        http_shutdown.graceful_shutdown(Some(Duration::from_secs(30)));
+        https_shutdown.graceful_shutdown(Some(Duration::from_secs(30)));
+    });
+    let app = if let Some(cfg) = &tls {
+        if cfg.redirect_http { balancer_http::redirect_router(cfg) } else { server.router.clone() }
+    } else { server.router.clone() };
+    tracing::info!(address = %listener.local_addr()?, "HTTP listener bound");
+    let http = async {
+        axum_server::from_tcp(listener)?.handle(http_handle)
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+            .await.context("HTTP server")
+    };
+    let https = async {
+        if let Some(cfg) = tls {
+            let router = balancer_http::https_router(server.router.clone(), &cfg);
+            balancer_tls::serve(cfg, router, https_handle).await?;
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+    let result = tokio::try_join!(http, https);
+    signal.abort();
+    result?;
     Ok(())
 }
 

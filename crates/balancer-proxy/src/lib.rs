@@ -8,11 +8,18 @@ use hyper::body::Incoming;
 use hyper_util::{client::legacy::{connect::HttpConnector, Client}, rt::TokioExecutor};
 use std::{net::IpAddr, pin::Pin, sync::Arc, task::{Context, Poll}, time::Duration};
 
-pub type HttpClient = Client<HttpConnector, Body>;
+pub type HttpClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Body>;
 
 pub fn client() -> HttpClient {
     let mut connector = HttpConnector::new();
     connector.set_connect_timeout(Some(Duration::from_secs(5)));
+    let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let tls = rustls::ClientConfig::builder_with_provider(
+        Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions().expect("supported TLS versions")
+        .with_root_certificates(roots).with_no_client_auth();
+    let connector = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_tls_config(tls).https_or_http().enable_http1().wrap_connector(connector);
     Client::builder(TokioExecutor::new()).build(connector)
 }
 
@@ -50,7 +57,7 @@ impl HttpBody for LeasedBody {
 }
 
 pub async fn forward(client: &HttpClient, pool: &Pool, mut req: Request<Body>,
-    peer: IpAddr, host: Option<String>, timeout: Duration) -> Response {
+    peer: IpAddr, host: Option<String>, secure: bool, timeout: Duration) -> Response {
     if req.method() == Method::CONNECT || req.headers().contains_key(header::UPGRADE) {
         return (StatusCode::NOT_IMPLEMENTED, "tunneling and upgrades are not supported").into_response();
     }
@@ -84,7 +91,7 @@ pub async fn forward(client: &HttpClient, pool: &Pool, mut req: Request<Body>,
     if let Ok(value) = HeaderValue::from_str(&peer.to_string()) {
         headers.insert("x-forwarded-for", value);
     }
-    headers.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+    headers.insert("x-forwarded-proto", HeaderValue::from_static(if secure { "https" } else { "http" }));
     if let Some(host) = host.and_then(|h| HeaderValue::from_str(&h).ok()) {
         headers.insert("x-forwarded-host", host);
     }
