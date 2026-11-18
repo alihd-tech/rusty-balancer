@@ -1,0 +1,20 @@
+listen = "127.0.0.1:8080"
+[[routes]]
+static_dir = "examples/public"
+
+[[transport.tcp]]
+name = "tcp-demo"
+listen = "127.0.0.1:15432"
+strategy = "least_connections"
+max_connections = 128
+[[transport.tcp.targets]]
+address = "127.0.0.1:5432"
+
+[[transport.udp]]
+name = "udp-demo"
+listen = "127.0.0.1:15353"
+strategy = "consistent_hash"
+max_sessions = 64
+allow = ["127.0.0.0/8"]
+[[transport.udp.targets]]
+address = "127.0.0.1:5353"

@@ -35,6 +35,9 @@ async fn main() -> Result<()> {
     listener.set_nonblocking(true)?;
     let manual = tls.as_ref().map(balancer_tls::manual_handle).transpose()?.flatten();
     let admin = config.admin.clone();
+    let transport = balancer_transport::Bound::bind(config.transport.clone()).await?;
+    let stop = tokio_util::sync::CancellationToken::new();
+    let transport_stop = stop.clone();
     let control = balancer_http::control::Control::new(config);
     let data_router = control.router();
     let admin_listener = admin.as_ref().map(|a| -> Result<std::net::TcpListener> {
@@ -51,6 +54,7 @@ async fn main() -> Result<()> {
     let https_shutdown = https_handle.clone();
     let signal = tokio::spawn(async move {
         shutdown().await;
+        stop.cancel();
         http_shutdown.graceful_shutdown(Some(Duration::from_secs(30)));
         https_shutdown.graceful_shutdown(Some(Duration::from_secs(30)));
         admin_shutdown.graceful_shutdown(Some(Duration::from_secs(30)));
@@ -78,7 +82,7 @@ async fn main() -> Result<()> {
         }
         Ok::<(), anyhow::Error>(())
     };
-    let result = tokio::try_join!(http, https, management);
+    let result = tokio::try_join!(http, https, management, transport.serve(transport_stop));
     signal.abort();
     result?;
     Ok(())

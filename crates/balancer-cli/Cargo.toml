@@ -16,3 +16,5 @@ tracing-subscriber.workspace = true
 axum-server.workspace = true
 balancer-tls.workspace = true
 balancer-api.workspace = true
+balancer-transport.workspace = true
+tokio-util.workspace = true

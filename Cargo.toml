@@ -10,6 +10,7 @@ members = [
   "crates/balancer-middleware",
   "crates/balancer-api",
   "crates/balancer-observability",
+  "crates/balancer-transport",
 ]
 default-members = ["crates/balancer-cli"]
 
@@ -45,6 +46,8 @@ serde_json = "1"
 sha2 = "0.10"
 subtle = "2"
 arc-swap = "1"
+balancer-transport = { path = "crates/balancer-transport" }
+tokio-util = { version = "0.7", features = ["rt"] }
 balancer-api = { path = "crates/balancer-api" }
 balancer-observability = { path = "crates/balancer-observability" }
 tokio = { version = "1", features = ["full"] }

@@ -3,12 +3,16 @@ use http::{uri::Authority, Uri};
 use serde::Deserialize;
 use std::{collections::{BTreeMap, HashSet}, net::SocketAddr, path::{Path, PathBuf}};
 
+pub mod transport;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub listen: SocketAddr,
     pub tls: Option<TlsConfig>,
     pub admin: Option<AdminConfig>,
+    #[serde(default)]
+    pub transport: transport::TransportConfig,
     #[serde(default)]
     pub traffic: TrafficConfig,
     #[serde(default = "timeout_default")]
@@ -292,6 +296,7 @@ impl Config {
                 bail!("admin listener must be loopback-only with a distinct nonzero port and token file");
             }
         }
+        self.transport.validate(self.listen, self.tls.as_ref().map(|t| t.listen), self.admin.as_ref().map(|a| a.listen))?;
         if self.routes.len() > 4096 || self.pools.len() > 256 ||
             self.pools.values().map(|p| p.endpoints.len()).sum::<usize>() > 2048 {
             bail!("configuration exceeds route or upstream capacity");
