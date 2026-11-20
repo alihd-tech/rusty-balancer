@@ -1,5 +1,6 @@
 name: Pin Rust dependencies
 # Temporary branch-only formatting and dependency locking assistant.
+# Final formatting pass after strict Clippy remediation.
 
 on:
   push:
