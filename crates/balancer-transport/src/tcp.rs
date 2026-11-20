@@ -164,7 +164,7 @@ async fn connection(
 }
 pub async fn serve(listener: TcpListener, cfg: TcpService, stop: CancellationToken) -> Result<()> {
     let default = (!cfg.targets.is_empty()).then(|| pool(&cfg.targets, cfg.strategy));
-    let routes = Arc::new(
+    let routes: Arc<HashMap<String, Arc<Pool>>> = Arc::new(
         cfg.sni
             .iter()
             .map(|r| (r.host.clone(), pool(&r.targets, cfg.strategy)))
