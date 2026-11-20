@@ -1,7 +1,11 @@
 use anyhow::{bail, Context, Result};
 use http::{uri::Authority, Uri};
 use serde::Deserialize;
-use std::{collections::{BTreeMap, HashSet}, net::SocketAddr, path::{Path, PathBuf}};
+use std::{
+    collections::{BTreeMap, HashSet},
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 pub mod transport;
 
@@ -64,16 +68,28 @@ pub struct AdminConfig {
 pub const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 
 pub fn is_dns_name(name: &str) -> bool {
-    name.len() <= 253 && name.parse::<std::net::IpAddr>().is_err() &&
-        name.split('.').all(|label| !label.is_empty() && label.len() <= 63 &&
-            !label.starts_with('-') && !label.ends_with('-') &&
-            label.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'))
+    name.len() <= 253
+        && name.parse::<std::net::IpAddr>().is_err()
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        })
 }
 
 impl TlsConfig {
     pub fn domains(&self) -> Vec<String> {
-        if let Some(acme) = &self.acme { return acme.domains.clone(); }
-        self.certificates.iter().flat_map(|cert| cert.domains.clone()).collect()
+        if let Some(acme) = &self.acme {
+            return acme.domains.clone();
+        }
+        self.certificates
+            .iter()
+            .flat_map(|cert| cert.domains.clone())
+            .collect()
     }
 
     pub fn external_port(&self) -> u16 {
@@ -81,7 +97,8 @@ impl TlsConfig {
     }
 
     fn validate(&mut self, http: SocketAddr) -> Result<()> {
-        if self.listen.port() == 0 || self.external_port() == 0 || self.listen.port() == http.port() {
+        if self.listen.port() == 0 || self.external_port() == 0 || self.listen.port() == http.port()
+        {
             bail!("TLS requires a distinct listener and nonzero ports");
         }
         if self.certificates.is_empty() == self.acme.is_none() {
@@ -89,7 +106,9 @@ impl TlsConfig {
         }
         let mut seen = HashSet::new();
         let mut normalize = |domains: &mut Vec<String>| -> Result<()> {
-            if domains.is_empty() { bail!("TLS certificate requires at least one DNS name"); }
+            if domains.is_empty() {
+                bail!("TLS certificate requires at least one DNS name");
+            }
             for name in domains {
                 *name = name.to_ascii_lowercase();
                 if !is_dns_name(name) || !seen.insert(name.clone()) {
@@ -109,11 +128,15 @@ impl TlsConfig {
             if acme.domains.len() > 100 || acme.domains.iter().any(|d| !d.contains('.')) {
                 bail!("ACME requires 1..=100 fully qualified DNS names");
             }
-            if !acme.email.contains('@') || acme.email.chars().any(char::is_whitespace) ||
-                acme.cache_dir.as_os_str().is_empty() {
+            if !acme.email.contains('@')
+                || acme.email.chars().any(char::is_whitespace)
+                || acme.cache_dir.as_os_str().is_empty()
+            {
                 bail!("ACME requires a contact email and private cache directory");
             }
-            if self.external_port() != 443 { bail!("TLS-ALPN-01 requires external port 443"); }
+            if self.external_port() != 443 {
+                bail!("TLS-ALPN-01 requires external port 443");
+            }
         }
         Ok(())
     }
@@ -184,8 +207,14 @@ pub struct TrafficConfig {
 }
 impl Default for TrafficConfig {
     fn default() -> Self {
-        Self { compression: false, security_headers: false, max_in_flight: 1024, max_connections: 4096,
-            response_idle_ms: 30000, trusted_proxies: Vec::new() }
+        Self {
+            compression: false,
+            security_headers: false,
+            max_in_flight: 1024,
+            max_connections: 4096,
+            response_idle_ms: 30000,
+            trusted_proxies: Vec::new(),
+        }
     }
 }
 
@@ -220,56 +249,94 @@ pub struct CacheConfig {
 
 impl RoutePolicy {
     fn validate(&self, proxy: bool) -> Result<()> {
-        if self.allow.len() + self.deny.len() > 1024 { bail!("too many IP rules"); }
-        if self.max_body_bytes.is_some_and(|n| n == 0 || n > 16 * 1024 * 1024) ||
-            self.body_timeout_ms.is_some_and(|n| n == 0 || n > 300_000) ||
-            (self.body_timeout_ms.is_some() && self.max_body_bytes.is_none()) {
-            bail!("body policy requires max_body_bytes 1..=16777216 and optional timeout 1..=300000");
+        if self.allow.len() + self.deny.len() > 1024 {
+            bail!("too many IP rules");
+        }
+        if self
+            .max_body_bytes
+            .is_some_and(|n| n == 0 || n > 16 * 1024 * 1024)
+            || self.body_timeout_ms.is_some_and(|n| n == 0 || n > 300_000)
+            || (self.body_timeout_ms.is_some() && self.max_body_bytes.is_none())
+        {
+            bail!(
+                "body policy requires max_body_bytes 1..=16777216 and optional timeout 1..=300000"
+            );
         }
         if let Some(rate) = &self.rate_limit {
-            if !(1..=100_000).contains(&rate.requests_per_second) ||
-                !(1..=100_000).contains(&rate.burst) || !(1..=100_000).contains(&rate.max_clients) {
+            if !(1..=100_000).contains(&rate.requests_per_second)
+                || !(1..=100_000).contains(&rate.burst)
+                || !(1..=100_000).contains(&rate.max_clients)
+            {
                 bail!("invalid rate limit bounds");
             }
         }
         if let Some(cache) = &self.cache {
-            if !proxy || !(1..=86400).contains(&cache.ttl_seconds) ||
-                !(1..=4096).contains(&cache.max_entries) ||
-                !(1..=1024*1024).contains(&cache.max_body_bytes) ||
-                cache.max_entries.saturating_mul(cache.max_body_bytes + 16384) > 64 * 1024 * 1024 {
+            if !proxy
+                || !(1..=86400).contains(&cache.ttl_seconds)
+                || !(1..=4096).contains(&cache.max_entries)
+                || !(1..=1024 * 1024).contains(&cache.max_body_bytes)
+                || cache
+                    .max_entries
+                    .saturating_mul(cache.max_body_bytes + 16384)
+                    > 64 * 1024 * 1024
+            {
                 bail!("cache requires proxy route and bounded capacity (64 MiB per route)");
             }
         }
-        if self.websocket && !proxy { bail!("WebSocket requires a proxy route"); }
-        if self.websocket_max_seconds.is_some_and(|n| n == 0 || n > 86400) ||
-            (self.websocket_max_seconds.is_some() && !self.websocket) {
+        if self.websocket && !proxy {
+            bail!("WebSocket requires a proxy route");
+        }
+        if self
+            .websocket_max_seconds
+            .is_some_and(|n| n == 0 || n > 86400)
+            || (self.websocket_max_seconds.is_some() && !self.websocket)
+        {
             bail!("invalid WebSocket lifetime policy");
         }
         Ok(())
     }
 }
 
-fn root() -> String { "/".into() }
-fn one() -> u32 { 1 }
-fn timeout_default() -> u64 { 5_000 }
-fn interval_default() -> u64 { 10_000 }
+fn root() -> String {
+    "/".into()
+}
+fn one() -> u32 {
+    1
+}
+fn timeout_default() -> u64 {
+    5_000
+}
+fn interval_default() -> u64 {
+    10_000
+}
 
 pub fn hostname(value: &str) -> Option<String> {
-    if value.contains('@') { return None; }
+    if value.contains('@') {
+        return None;
+    }
     let authority: Authority = value.parse().ok()?;
     let host = authority.host().trim_end_matches('.').to_ascii_lowercase();
-    if host.is_empty() { None } else { Some(host) }
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
 }
 
 pub fn path_matches(prefix: &str, path: &str) -> bool {
-    prefix == "/" || path == prefix ||
-        path.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'))
+    prefix == "/"
+        || path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn valid_path(value: &str) -> bool {
-    value.starts_with('/') && !value.starts_with("//") &&
-        !value.contains('?') && !value.contains('#') &&
-        value.parse::<http::uri::PathAndQuery>().is_ok()
+    value.starts_with('/')
+        && !value.starts_with("//")
+        && !value.contains('?')
+        && !value.contains('#')
+        && value.parse::<http::uri::PathAndQuery>().is_ok()
 }
 
 impl Config {
@@ -277,45 +344,80 @@ impl Config {
         let path = path.as_ref();
         use std::io::Read;
         let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
-        if !file.metadata()?.is_file() { bail!("configuration must be a regular file"); }
+        if !file.metadata()?.is_file() {
+            bail!("configuration must be a regular file");
+        }
         let mut content = String::new();
-        file.take(MAX_CONFIG_BYTES as u64 + 1).read_to_string(&mut content)?;
+        file.take(MAX_CONFIG_BYTES as u64 + 1)
+            .read_to_string(&mut content)?;
         Self::parse(&content)
     }
 
     pub fn parse(content: &str) -> Result<Self> {
-        if content.len() > MAX_CONFIG_BYTES { bail!("configuration exceeds 1 MiB"); }
+        if content.len() > MAX_CONFIG_BYTES {
+            bail!("configuration exceeds 1 MiB");
+        }
         let mut config: Self = toml::from_str(content).context("invalid TOML configuration")?;
         config.validate()?;
         Ok(config)
     }
 
     pub fn validate(&mut self) -> Result<()> {
-        if let Some(tls) = &mut self.tls { tls.validate(self.listen)?; }
+        if let Some(tls) = &mut self.tls {
+            tls.validate(self.listen)?;
+        }
         if let Some(admin) = &self.admin {
-            if !admin.listen.ip().is_loopback() || admin.listen.port() == 0 ||
-                admin.listen.port() == self.listen.port() ||
-                self.tls.as_ref().is_some_and(|t| t.listen.port() == admin.listen.port()) ||
-                admin.token_file.as_os_str().is_empty() {
+            if !admin.listen.ip().is_loopback()
+                || admin.listen.port() == 0
+                || admin.listen.port() == self.listen.port()
+                || self
+                    .tls
+                    .as_ref()
+                    .is_some_and(|t| t.listen.port() == admin.listen.port())
+                || admin.token_file.as_os_str().is_empty()
+            {
                 bail!("admin listener must be loopback-only with a distinct nonzero port and token file");
             }
         }
         if let Some(h3) = &self.http3 {
             h3.validate(self.tls.as_ref(), &self.transport)?;
         }
-        self.transport.validate(self.listen, self.tls.as_ref().map(|t| t.listen), self.admin.as_ref().map(|a| a.listen))?;
-        if self.routes.len() > 4096 || self.pools.len() > 256 ||
-            self.pools.values().map(|p| p.endpoints.len()).sum::<usize>() > 2048 {
+        self.transport.validate(
+            self.listen,
+            self.tls.as_ref().map(|t| t.listen),
+            self.admin.as_ref().map(|a| a.listen),
+        )?;
+        if self.routes.len() > 4096
+            || self.pools.len() > 256
+            || self
+                .pools
+                .values()
+                .map(|p| p.endpoints.len())
+                .sum::<usize>()
+                > 2048
+        {
             bail!("configuration exceeds route or upstream capacity");
         }
-        let ring_nodes: u64 = self.pools.values().filter(|p| p.algorithm == Algorithm::ConsistentHash)
-            .flat_map(|p| &p.endpoints).map(|e| u64::from(e.weight) * 64).sum();
-        if ring_nodes > 2_000_000 { bail!("consistent hash ring capacity exceeded"); }
-        if !(1..=100_000).contains(&self.traffic.max_in_flight) ||
-            !(1..=100_000).contains(&self.traffic.max_connections) ||
-            !(1..=300_000).contains(&self.traffic.response_idle_ms) ||
-            self.traffic.trusted_proxies.len() > 64 ||
-            self.traffic.trusted_proxies.iter().any(|net| net.prefix_len() == 0) {
+        let ring_nodes: u64 = self
+            .pools
+            .values()
+            .filter(|p| p.algorithm == Algorithm::ConsistentHash)
+            .flat_map(|p| &p.endpoints)
+            .map(|e| u64::from(e.weight) * 64)
+            .sum();
+        if ring_nodes > 2_000_000 {
+            bail!("consistent hash ring capacity exceeded");
+        }
+        if !(1..=100_000).contains(&self.traffic.max_in_flight)
+            || !(1..=100_000).contains(&self.traffic.max_connections)
+            || !(1..=300_000).contains(&self.traffic.response_idle_ms)
+            || self.traffic.trusted_proxies.len() > 64
+            || self
+                .traffic
+                .trusted_proxies
+                .iter()
+                .any(|net| net.prefix_len() == 0)
+        {
             bail!("invalid traffic resource limits");
         }
         let mut cache_budget = 0usize;
@@ -330,36 +432,64 @@ impl Config {
             let mut seen = HashSet::new();
             for endpoint in &mut pool.endpoints {
                 let uri: Uri = endpoint.url.parse().context("invalid upstream URL")?;
-                let Some(authority) = uri.authority() else { bail!("missing upstream authority"); };
-                if !matches!(uri.scheme_str(), Some("http" | "https")) || uri.path() != "/" ||
-                    uri.query().is_some() || authority.as_str().contains('@') ||
-                    endpoint.url.contains('#') || endpoint.weight == 0 || endpoint.weight > 100 {
+                let Some(authority) = uri.authority() else {
+                    bail!("missing upstream authority");
+                };
+                if !matches!(uri.scheme_str(), Some("http" | "https"))
+                    || uri.path() != "/"
+                    || uri.query().is_some()
+                    || authority.as_str().contains('@')
+                    || endpoint.url.contains('#')
+                    || endpoint.weight == 0
+                    || endpoint.weight > 100
+                {
                     bail!("pool {name}: endpoints must be HTTP(S) origins with weight 1..=100");
                 }
-                endpoint.url = format!("{}://{}", uri.scheme_str().unwrap(), authority.as_str().to_ascii_lowercase());
-                if !seen.insert(endpoint.url.clone()) { bail!("pool {name}: duplicate endpoint"); }
+                endpoint.url = format!(
+                    "{}://{}",
+                    uri.scheme_str().unwrap(),
+                    authority.as_str().to_ascii_lowercase()
+                );
+                if !seen.insert(endpoint.url.clone()) {
+                    bail!("pool {name}: duplicate endpoint");
+                }
             }
             if let Some(health) = &pool.health {
-                if !valid_path(&health.path) || health.interval_ms == 0 ||
-                    health.timeout_ms == 0 || health.timeout_ms > health.interval_ms ||
-                    health.interval_ms > 3_600_000 ||
-                    health.healthy_threshold == 0 || health.unhealthy_threshold == 0 {
+                if !valid_path(&health.path)
+                    || health.interval_ms == 0
+                    || health.timeout_ms == 0
+                    || health.timeout_ms > health.interval_ms
+                    || health.interval_ms > 3_600_000
+                    || health.healthy_threshold == 0
+                    || health.unhealthy_threshold == 0
+                {
                     bail!("pool {name}: invalid health check settings");
                 }
             }
         }
-        if self.routes.is_empty() { bail!("at least one route is required"); }
+        if self.routes.is_empty() {
+            bail!("at least one route is required");
+        }
         let mut seen = HashSet::new();
         for route in &mut self.routes {
             route.policy.validate(route.pool.is_some())?;
-            if let Some(c) = &route.policy.cache { cache_budget = cache_budget.saturating_add(c.max_entries.saturating_mul(c.max_body_bytes + 16384)); }
-            if let Some(r) = &route.policy.rate_limit { client_budget = client_budget.saturating_add(r.max_clients); }
+            if let Some(c) = &route.policy.cache {
+                cache_budget = cache_budget
+                    .saturating_add(c.max_entries.saturating_mul(c.max_body_bytes + 16384));
+            }
+            if let Some(r) = &route.policy.rate_limit {
+                client_budget = client_budget.saturating_add(r.max_clients);
+            }
             if let Some(host) = &mut route.host {
                 let normalized = hostname(host).context("invalid route host")?;
-                if host.contains('*') { bail!("wildcard hosts are not supported"); }
+                if host.contains('*') {
+                    bail!("wildcard hosts are not supported");
+                }
                 *host = normalized;
             }
-            if !valid_path(&route.path_prefix) { bail!("invalid route path prefix"); }
+            if !valid_path(&route.path_prefix) {
+                bail!("invalid route path prefix");
+            }
             if route.path_prefix != "/" {
                 route.path_prefix = route.path_prefix.trim_end_matches('/').to_string();
             }
@@ -367,15 +497,22 @@ impl Config {
                 bail!("duplicate host/path route");
             }
             match (&route.pool, &route.static_dir) {
-                (Some(pool), None) if self.pools.contains_key(pool) => {},
-                (None, Some(dir)) if !dir.as_os_str().is_empty() => {},
+                (Some(pool), None) if self.pools.contains_key(pool) => {}
+                (None, Some(dir)) if !dir.as_os_str().is_empty() => {}
                 _ => bail!("route must specify exactly one existing pool or static_dir"),
             }
         }
-        if cache_budget > 128 * 1024 * 1024 || client_budget > 200_000 { bail!("aggregate policy capacity exceeded"); }
+        if cache_budget > 128 * 1024 * 1024 || client_budget > 200_000 {
+            bail!("aggregate policy capacity exceeded");
+        }
         if let Some(tls) = &self.tls {
             let domains = tls.domains();
-            if self.routes.iter().filter_map(|r| r.host.as_ref()).any(|host| !domains.contains(host)) {
+            if self
+                .routes
+                .iter()
+                .filter_map(|r| r.host.as_ref())
+                .any(|host| !domains.contains(host))
+            {
                 bail!("every named route must be covered by an explicitly configured TLS domain");
             }
         }
@@ -411,8 +548,14 @@ static_dir = "public"
     fn validates_connection_and_trusted_proxy_limits() {
         let base = "listen = \"127.0.0.1:8080\"\n[[routes]]\nstatic_dir = \"public\"";
         assert!(Config::parse(&format!("{base}\n[traffic]\nmax_connections = 0")).is_err());
-        assert!(Config::parse(&format!("{base}\n[traffic]\ntrusted_proxies = [\"0.0.0.0/0\"]")).is_err());
-        assert!(Config::parse(&format!("{base}\n[traffic]\ntrusted_proxies = [\"192.0.2.0/24\"]")).is_ok());
+        assert!(Config::parse(&format!(
+            "{base}\n[traffic]\ntrusted_proxies = [\"0.0.0.0/0\"]"
+        ))
+        .is_err());
+        assert!(Config::parse(&format!(
+            "{base}\n[traffic]\ntrusted_proxies = [\"192.0.2.0/24\"]"
+        ))
+        .is_ok());
     }
     #[test]
     fn tls_modes_and_https_origins() {
@@ -433,7 +576,10 @@ pool = "backend"
 "#;
         let config = Config::parse(input).unwrap();
         assert_eq!(config.tls.unwrap().domains(), vec!["example.test"]);
-        assert_eq!(config.pools["backend"].endpoints[0].url, "https://example.org");
+        assert_eq!(
+            config.pools["backend"].endpoints[0].url,
+            "https://example.org"
+        );
         assert!(Config::parse(&input.replace("EXAMPLE.TEST", "*.example.test")).is_err());
         assert!(Config::parse(&input.replace("8443", "8080")).is_err());
         assert!(Config::parse(&input.replace("EXAMPLE.TEST", "other.test")).is_err());
@@ -455,7 +601,15 @@ cache_dir = "state/acme"
 host = "example.org"
 static_dir = "public"
 "#;
-        assert!(!Config::parse(input).unwrap().tls.unwrap().acme.unwrap().production);
+        assert!(
+            !Config::parse(input)
+                .unwrap()
+                .tls
+                .unwrap()
+                .acme
+                .unwrap()
+                .production
+        );
         assert!(Config::parse(&input.replace("public_port = 443", "public_port = 8443")).is_err());
     }
 
@@ -464,7 +618,10 @@ static_dir = "public"
         let source = include_str!("../../../configs/traffic.example.toml");
         assert!(Config::parse(source).is_ok());
         assert!(Config::parse(&source.replace("max_clients = 10000", "max_clients = 0")).is_err());
-        assert!(Config::parse(&source.replace("max_body_bytes = 1048576", "max_body_bytes = 999999999")).is_err());
+        assert!(Config::parse(
+            &source.replace("max_body_bytes = 1048576", "max_body_bytes = 999999999")
+        )
+        .is_err());
         assert!(Config::parse(&source.replace("max_entries = 128", "max_entries = 4097")).is_err());
     }
 
@@ -474,9 +631,9 @@ static_dir = "public"
         assert!(Config::parse(input).is_ok());
         assert!(Config::parse(&input.replace("127.0.0.1:15432", "127.0.0.1:8080")).is_err());
         assert!(Config::parse(&input.replace("max_sessions = 64", "max_sessions = 0")).is_err());
-        let h3=include_str!("../../../configs/http3.example.toml");
+        let h3 = include_str!("../../../configs/http3.example.toml");
         assert!(Config::parse(h3).is_ok());
-        assert!(Config::parse(&h3.replace("max_requests = 64","max_requests = 999")).is_err());
+        assert!(Config::parse(&h3.replace("max_requests = 64", "max_requests = 999")).is_err());
     }
     #[test]
     fn admin_requires_separate_loopback_listener() {

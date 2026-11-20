@@ -6,7 +6,11 @@ use axum::Router;
 use axum_server::{tls_rustls::RustlsConfig, Handle};
 use balancer_config::TlsConfig;
 use futures_util::StreamExt;
-use rustls::{server::{ResolvesServerCertUsingSni, ResolvesServerCert, ClientHello}, sign::CertifiedKey, ServerConfig};
+use rustls::{
+    server::{ClientHello, ResolvesServerCert, ResolvesServerCertUsingSni},
+    sign::CertifiedKey,
+    ServerConfig,
+};
 use rustls_acme::{caches::DirCache, AcmeConfig};
 use std::{collections::HashSet, fs::File, io::BufReader, net::SocketAddr, path::Path, sync::Arc};
 use tokio::sync::Semaphore;
@@ -27,17 +31,25 @@ fn server_config(resolver: Arc<dyn ResolvesServerCert>) -> Result<Arc<ServerConf
 pub fn manual_config(tls: &TlsConfig) -> Result<Arc<ServerConfig>> {
     let mut resolver = ResolvesServerCertUsingSni::new();
     for cert in &tls.certificates {
-        let mut chain = BufReader::new(File::open(&cert.cert)
-            .with_context(|| format!("open certificate {}", cert.cert.display()))?);
+        let mut chain = BufReader::new(
+            File::open(&cert.cert)
+                .with_context(|| format!("open certificate {}", cert.cert.display()))?,
+        );
         let certs = rustls_pemfile::certs(&mut chain).collect::<std::io::Result<Vec<_>>>()?;
-        if certs.is_empty() { bail!("empty certificate chain: {}", cert.cert.display()); }
-        let mut key = BufReader::new(File::open(&cert.key)
-            .with_context(|| format!("open private key {}", cert.key.display()))?);
+        if certs.is_empty() {
+            bail!("empty certificate chain: {}", cert.cert.display());
+        }
+        let mut key = BufReader::new(
+            File::open(&cert.key)
+                .with_context(|| format!("open private key {}", cert.key.display()))?,
+        );
         let key = rustls_pemfile::private_key(&mut key)?.context("no PEM private key found")?;
         let certified = CertifiedKey::from_der(certs, key, &provider())
             .context("invalid certificate/private key pair")?;
         for domain in &cert.domains {
-            resolver.add(domain, certified.clone()).with_context(|| format!("certificate does not cover {domain}"))?;
+            resolver
+                .add(domain, certified.clone())
+                .with_context(|| format!("certificate does not cover {domain}"))?;
         }
     }
     server_config(Arc::new(resolver))
@@ -54,7 +66,9 @@ struct AllowedNames {
 impl ResolvesServerCert for AllowedNames {
     fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         let name = hello.server_name()?.to_ascii_lowercase();
-        if !self.names.contains(&name) { return None; }
+        if !self.names.contains(&name) {
+            return None;
+        }
         self.resolver.resolve(hello)
     }
 }
@@ -68,7 +82,9 @@ fn prepare_cache(path: &Path) -> Result<()> {
             use std::os::unix::fs::DirBuilderExt;
             builder.mode(0o700);
         }
-        builder.create(path).context("create ACME state directory")?;
+        builder
+            .create(path)
+            .context("create ACME state directory")?;
     }
     let meta = std::fs::symlink_metadata(path).context("inspect ACME state directory")?;
     if !meta.is_dir() || meta.file_type().is_symlink() {
@@ -86,33 +102,56 @@ fn prepare_cache(path: &Path) -> Result<()> {
 
 /// Validate local PEM files without starting a listener or contacting an ACME CA.
 pub fn validate(tls: &TlsConfig) -> Result<()> {
-    if tls.acme.is_none() { manual_config(tls)?; }
+    if tls.acme.is_none() {
+        manual_config(tls)?;
+    }
     Ok(())
 }
 
 pub fn manual_handle(tls: &TlsConfig) -> Result<Option<RustlsConfig>> {
-    if tls.acme.is_some() { Ok(None) }
-    else { Ok(Some(RustlsConfig::from_config(manual_config(tls)?))) }
+    if tls.acme.is_some() {
+        Ok(None)
+    } else {
+        Ok(Some(RustlsConfig::from_config(manual_config(tls)?)))
+    }
 }
 
 pub fn reload_manual(tls: &TlsConfig, handle: &RustlsConfig) -> Result<()> {
-    if tls.acme.is_some() { bail!("ACME certificates renew automatically"); }
+    if tls.acme.is_some() {
+        bail!("ACME certificates renew automatically");
+    }
     let config = manual_config(tls)?;
     handle.reload_from_config(config);
     Ok(())
 }
 
 pub fn harden_http<A>(server: &mut axum_server::Server<SocketAddr, A>) {
-    use std::time::Duration;
     use hyper_util::rt::TokioTimer;
-    server.http_builder().http1().timer(TokioTimer::new())
-        .header_read_timeout(Duration::from_secs(10)).max_buf_size(32768).max_headers(100);
-    server.http_builder().http2().timer(TokioTimer::new()).max_concurrent_streams(64)
-        .max_header_list_size(16384).keep_alive_interval(Duration::from_secs(30))
+    use std::time::Duration;
+    server
+        .http_builder()
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(Duration::from_secs(10))
+        .max_buf_size(32768)
+        .max_headers(100);
+    server
+        .http_builder()
+        .http2()
+        .timer(TokioTimer::new())
+        .max_concurrent_streams(64)
+        .max_header_list_size(16384)
+        .keep_alive_interval(Duration::from_secs(30))
         .keep_alive_timeout(Duration::from_secs(10));
 }
 
-pub async fn serve(tls: TlsConfig, app: Router, handle: Handle<SocketAddr>, manual: Option<RustlsConfig>, connections: Arc<Semaphore>) -> Result<()> {
+pub async fn serve(
+    tls: TlsConfig,
+    app: Router,
+    handle: Handle<SocketAddr>,
+    manual: Option<RustlsConfig>,
+    connections: Arc<Semaphore>,
+) -> Result<()> {
     let listener = std::net::TcpListener::bind(tls.listen).context("bind HTTPS listener")?;
     listener.set_nonblocking(true)?;
     tracing::info!(address = %listener.local_addr()?, "HTTPS listener bound");
@@ -139,23 +178,31 @@ pub async fn serve(tls: TlsConfig, app: Router, handle: Handle<SocketAddr>, manu
         // Abort the ACME task if the listener is dropped or returns.
         struct Worker(tokio::task::JoinHandle<()>);
         impl Drop for Worker {
-            fn drop(&mut self) { self.0.abort(); }
+            fn drop(&mut self) {
+                self.0.abort();
+            }
         }
         let _worker = Worker(worker);
         tracing::info!(production = acme.production, "ACME TLS-ALPN-01 enabled");
         let mut server = axum_server::from_tcp(listener)?
-            .acceptor(LimitedAcceptor::new(acceptor, connections.clone())).handle(handle);
+            .acceptor(LimitedAcceptor::new(acceptor, connections.clone()))
+            .handle(handle);
         harden_http(&mut server);
-        server.serve(app.into_make_service_with_connect_info::<SocketAddr>()).await
+        server
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
             .context("serve ACME HTTPS")
     } else {
         let config = manual.context("missing manual TLS handle")?;
         let acceptor = axum_server::tls_rustls::RustlsAcceptor::new(config)
             .handshake_timeout(std::time::Duration::from_secs(10));
         let mut server = axum_server::from_tcp(listener)?
-            .acceptor(LimitedAcceptor::new(acceptor, connections)).handle(handle);
+            .acceptor(LimitedAcceptor::new(acceptor, connections))
+            .handle(handle);
         harden_http(&mut server);
-        server.serve(app.into_make_service_with_connect_info::<SocketAddr>()).await
+        server
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
             .context("serve manual HTTPS")
     }
 }
