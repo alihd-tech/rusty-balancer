@@ -91,15 +91,24 @@ pub async fn forward(client: &HttpClient, pool: &Pool, mut req: Request<Body>,
     forwarding_headers(headers, upstream_host, peer, host, secure);
     match tokio::time::timeout(timeout, client.request(req)).await {
         Ok(Ok(response)) => {
+            if matches!(response.status(), StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT) {
+                lease.endpoint().observe_failure();
+            } else {
+                lease.endpoint().observe_success();
+            }
             let (mut parts, body) = response.into_parts();
             strip_hop_headers(&mut parts.headers);
             Response::from_parts(parts, Body::new(LeasedBody { inner: Box::pin(body), lease: Some(lease) }))
         }
         Ok(Err(error)) => {
+            lease.endpoint().observe_failure();
             tracing::warn!(%error, upstream = %lease.endpoint().origin, "upstream request failed");
             (StatusCode::BAD_GATEWAY, "upstream unavailable").into_response()
         }
-        Err(_) => (StatusCode::GATEWAY_TIMEOUT, "upstream response header timeout").into_response(),
+        Err(_) => {
+            lease.endpoint().observe_failure();
+            (StatusCode::GATEWAY_TIMEOUT, "upstream response header timeout").into_response()
+        },
     }
 }
 
@@ -141,9 +150,10 @@ pub async fn health_worker(client: HttpClient, endpoint: Arc<Endpoint>, config: 
         } else {
             successes = 0;
             failures = failures.saturating_add(1);
-            if failures >= config.unhealthy_threshold && endpoint.is_healthy() {
+            if failures >= config.unhealthy_threshold {
+                let was_healthy = endpoint.is_healthy();
                 endpoint.set_healthy(false);
-                tracing::warn!(upstream = %endpoint.origin, "upstream unhealthy");
+                if was_healthy { tracing::warn!(upstream = %endpoint.origin, "upstream unhealthy"); }
             }
         }
     }
