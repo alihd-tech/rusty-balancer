@@ -13,6 +13,7 @@ pub struct Endpoint {
     pub weight: u32,
     healthy: AtomicBool,
     observed: AtomicBool,
+    verified: AtomicBool,
     passive: Mutex<Passive>,
     active: AtomicUsize,
 }
@@ -40,13 +41,17 @@ impl Endpoint {
     }
     /// Unlike routing eligibility, readiness requires verified reachability.
     pub fn is_ready(&self) -> bool {
-        self.observed.load(Ordering::Acquire) && self.is_healthy()
+        self.verified.load(Ordering::Acquire) && self.is_healthy()
     }
     pub fn has_observation(&self) -> bool {
         self.observed.load(Ordering::Acquire)
     }
+    pub fn has_verification(&self) -> bool {
+        self.verified.load(Ordering::Acquire)
+    }
     pub fn set_healthy(&self, value: bool) {
         self.observed.store(true, Ordering::Release);
+        self.verified.store(value, Ordering::Release);
         self.healthy.store(value, Ordering::Release);
         if value {
             self.reset_passive();
@@ -59,10 +64,11 @@ impl Endpoint {
     }
     pub fn observe_success(&self) {
         self.observed.store(true, Ordering::Release);
+        self.verified.store(true, Ordering::Release);
         self.reset_passive();
     }
     /// Eject after three failures without replaying potentially unsafe requests.
-    /// One half-open attempt is allowed once the 15-second cooldown expires.
+    /// The endpoint becomes selectable again after the 15-second cooldown.
     pub fn observe_failure(&self) {
         self.observed.store(true, Ordering::Release);
         let mut state = self.passive.lock().unwrap_or_else(|e| e.into_inner());
@@ -133,6 +139,7 @@ impl Pool {
                     weight: e.weight,
                     healthy: AtomicBool::new(config.health.is_none()),
                     observed: AtomicBool::new(false),
+                    verified: AtomicBool::new(false),
                     passive: Mutex::new(Passive {
                         consecutive_failures: 0,
                         ejected_until: None,
@@ -256,6 +263,9 @@ mod tests {
         let p = pool(Algorithm::RoundRobin);
         let endpoint = &p.endpoints()[0];
         assert!(endpoint.is_healthy());
+        assert!(!endpoint.is_ready());
+        endpoint.observe_failure();
+        assert!(endpoint.has_observation());
         assert!(!endpoint.is_ready());
         endpoint.observe_success();
         assert!(endpoint.is_ready());
