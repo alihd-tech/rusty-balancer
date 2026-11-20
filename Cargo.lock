@@ -375,6 +375,8 @@ dependencies = [
  "balancer-observability",
  "balancer-proxy",
  "http",
+ "ipnet",
+ "percent-encoding",
  "serde",
  "tokio",
  "tower",
@@ -420,6 +422,7 @@ dependencies = [
  "http",
  "http-body",
  "httpdate",
+ "ipnet",
  "serde",
  "tokio",
 ]
