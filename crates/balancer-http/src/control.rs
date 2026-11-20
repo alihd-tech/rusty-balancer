@@ -25,7 +25,7 @@ pub struct Control {
 }
 
 #[derive(Serialize)]
-pub struct EndpointStatus { pub origin: String, pub weight: u32, pub eligible: bool, pub active: usize }
+pub struct EndpointStatus { pub origin: String, pub weight: u32, pub eligible: bool, pub observed: bool, pub active: usize }
 #[derive(Serialize)]
 pub struct PoolStatus { pub name: String, pub endpoints: Vec<EndpointStatus> }
 #[derive(Serialize)]
@@ -77,13 +77,13 @@ impl Control {
         let r = &generation.server.runtime;
         let pools = r.pools.iter().map(|(name,pool)| PoolStatus { name: name.clone(),
             endpoints: pool.endpoints().iter().map(|e| EndpointStatus { origin: e.origin.clone(),
-                weight: e.weight, eligible: e.is_healthy(), active: e.active() }).collect() }).collect();
+                weight: e.weight, eligible: e.is_healthy(), observed: e.has_observation(), active: e.active() }).collect() }).collect();
         let routes = r.routes.iter().enumerate().map(|(index, route)| RouteStatus {
             index, host: route.host.clone(), path_prefix: route.path_prefix.clone(), pool: route.pool.clone(),
             static_files: route.static_dir.is_some(), cache: r.policies[index].cache.as_ref().map(|c| c.stats()),
         }).collect();
         let ready = r.routes.iter().all(|route| route.pool.as_ref().map_or(true, |name|
-            r.pools[name].endpoints().iter().any(|e| e.is_healthy())));
+            r.pools[name].endpoints().iter().any(|e| e.is_ready())));
         Snapshot { revision: generation.revision, ready,
             in_flight: generation.config.traffic.max_in_flight.saturating_sub(self.permits.available_permits()), pools, routes }
     }
@@ -158,6 +158,14 @@ mod tests {
         let _ = to_bytes(result.into_body(), 1024).await.unwrap();
         assert!(control.prometheus().contains("rusty_balancer_requests_total 1"));
         assert_eq!(control.snapshot().revision, 3);
+    }
+    #[test]
+    fn readiness_waits_for_observed_upstream_health() {
+        let cfg = Config::parse("listen = \"127.0.0.1:8080\"\n[pools.app]\n[[pools.app.endpoints]]\nurl = \"http://127.0.0.1:9001\"\n[[routes]]\npool = \"app\"").unwrap();
+        let control = Control::new(cfg);
+        assert!(!control.snapshot().ready);
+        control.current().server.runtime.pools["app"].endpoints()[0].observe_success();
+        assert!(control.snapshot().ready);
     }
     #[tokio::test]
     async fn shared_admission_is_preserved_across_reload() {
