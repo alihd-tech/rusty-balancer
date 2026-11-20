@@ -83,4 +83,4 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--ca-certs", required=True)
     arguments = parser.parse_args()
-    asyncio.run(asyncio.wait_for(run(arguments), timeout=12))
+    asyncio.run(asyncio.wait_for(run(arguments), timeout=4))
