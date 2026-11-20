@@ -156,7 +156,7 @@ impl Control {
                         weight: e.weight,
                         eligible: e.is_healthy(),
                         observed: e.has_observation(),
-                    verified: e.has_verification(),
+                        verified: e.has_verification(),
                         active: e.active(),
                     })
                     .collect(),
