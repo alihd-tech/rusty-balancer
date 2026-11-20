@@ -3,6 +3,8 @@ use balancer_config::{hostname, path_matches, Config, RouteConfig, TlsConfig};
 use balancer_lb::Pool;
 use balancer_proxy::HttpClient;
 use http::{header, StatusCode, Uri};
+use ipnet::IpNet;
+use std::{io::ErrorKind, path::Path};
 use std::{collections::{BTreeMap, HashSet}, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
@@ -20,6 +22,7 @@ struct Runtime {
     in_flight: Arc<Semaphore>,
     idle: Duration,
     security_headers: bool,
+    trusted_proxies: Vec<IpNet>,
 }
 
 struct PolicyRuntime { rate: Option<RateLimiter>, cache: Option<Cache> }
@@ -67,6 +70,7 @@ fn build_with_permits(config: Config, permits: Arc<Semaphore>) -> Server {
         in_flight: permits,
         idle: Duration::from_millis(config.traffic.response_idle_ms),
         security_headers: config.traffic.security_headers,
+        trusted_proxies: config.traffic.trusted_proxies,
     });
     let router = Router::new().fallback(dispatch).with_state(runtime.clone());
     let router = if compression { router.layer(CompressionLayer::new().gzip(true).br(true).zstd(true).deflate(false)) } else { router };
@@ -143,6 +147,10 @@ async fn dispatch_inner(runtime: &Runtime, peer: SocketAddr, ingress: Option<Ext
         Ok(host) => host,
         Err(status) => return status.into_response(),
     };
+    let client_ip = match balancer_middleware::client_ip(peer.ip(), request.headers(), &runtime.trusted_proxies) {
+        Ok(ip) => ip,
+        Err(status) => return status.into_response(),
+    };
     let host = raw_host.and_then(hostname);
     if raw_host.is_some() && host.is_none() { return StatusCode::BAD_REQUEST.into_response(); }
     if let Some(Extension(https)) = &ingress {
@@ -165,8 +173,8 @@ async fn dispatch_inner(runtime: &Runtime, peer: SocketAddr, ingress: Option<Ext
     let index = runtime.routes.iter().position(|r| std::ptr::eq(r, route)).expect("matched route");
     let policy = &route.policy;
     let state = &runtime.policies[index];
-    if !balancer_middleware::allowed(policy, peer.ip()) { return StatusCode::FORBIDDEN.into_response(); }
-    if state.rate.as_ref().is_some_and(|r| !r.admit(peer.ip())) {
+    if !balancer_middleware::allowed(policy, client_ip) { return StatusCode::FORBIDDEN.into_response(); }
+    if state.rate.as_ref().is_some_and(|r| !r.admit(client_ip)) {
         return (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, "1")]).into_response();
     }
     let Ok(permit) = runtime.in_flight.clone().try_acquire_owned() else {
@@ -181,7 +189,7 @@ async fn dispatch_inner(runtime: &Runtime, peer: SocketAddr, ingress: Option<Ext
         if request.headers().contains_key(header::UPGRADE) {
             if !policy.websocket { return StatusCode::NOT_IMPLEMENTED.into_response(); }
             return balancer_proxy::websocket::forward(&runtime.client, &runtime.pools[pool], request,
-                peer.ip(), forwarded_host, secure, runtime.timeout,
+                client_ip, forwarded_host, secure, runtime.timeout,
                 Duration::from_secs(policy.websocket_max_seconds.unwrap_or(3600)), permit).await;
         }
         let cache_key = state.cache.as_ref().filter(|_| balancer_middleware::cache::eligible(&request))
@@ -192,7 +200,7 @@ async fn dispatch_inner(runtime: &Runtime, peer: SocketAddr, ingress: Option<Ext
             if let Some(response) = cache.get(key) { return balancer_middleware::limits::guard(response, permit, runtime.idle); }
         }
         let response = balancer_proxy::forward(&runtime.client, &runtime.pools[pool], request,
-            peer.ip(), forwarded_host, secure, runtime.timeout).await;
+            client_ip, forwarded_host, secure, runtime.timeout).await;
         let response = match (&state.cache, cache_key) {
             (Some(cache), Some(key)) => cache.store(key, response, runtime.idle, epoch).await,
             _ => response,
@@ -207,6 +215,7 @@ async fn dispatch_inner(runtime: &Runtime, peer: SocketAddr, ingress: Option<Ext
             else if suffix.is_empty() { "/".to_owned() } else { suffix.to_owned() };
         if let Some(query) = request.uri().query() { target.push('?'); target.push_str(query); }
         let Ok(uri) = target.parse::<Uri>() else { return StatusCode::BAD_REQUEST.into_response(); };
+        if !static_path_safe(dir, uri.path()).await { return StatusCode::FORBIDDEN.into_response(); }
         *request.uri_mut() = uri;
         return match ServeDir::new(dir).oneshot(request).await {
             Ok(mut response) => {
@@ -230,11 +239,56 @@ async fn dispatch_inner(runtime: &Runtime, peer: SocketAddr, ingress: Option<Ext
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
 }
 
+// ServeDir decodes URL escapes and follows symlinks. Protect the configured
+// static root against traversal and symlink escapes. Static directories must
+// still be immutable to untrusted users (TOCTOU is not prevented here).
+async fn static_path_safe(root: &Path, encoded_path: &str) -> bool {
+    let decoded = match percent_encoding::percent_decode_str(encoded_path).decode_utf8() {
+        Ok(path) => path,
+        Err(_) => return false,
+    };
+    let relative = decoded.trim_start_matches('/');
+    let mut current = root.to_path_buf();
+    match tokio::fs::symlink_metadata(&current).await {
+        Ok(meta) if meta.file_type().is_symlink() => return false,
+        Err(error) if error.kind() != ErrorKind::NotFound => return false,
+        _ => {},
+    }
+    for segment in relative.split('/') {
+        if segment.is_empty() || segment == "." { continue; }
+        if segment == ".." || segment.contains('\\') || segment.contains('\0') { return false; }
+        current.push(segment);
+        match tokio::fs::symlink_metadata(&current).await {
+            Ok(meta) if meta.file_type().is_symlink() => return false,
+            Err(error) if error.kind() == ErrorKind::NotFound => break,
+            Err(_) => return false,
+            _ => {},
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use http::Request;
     use axum::body::to_bytes;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn denies_static_symlink_escape_and_encoded_traversal() {
+        use std::os::unix::fs::symlink;
+        let temp = std::env::temp_dir().join(format!("rusty-static-{}-{}",
+            std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let root = temp.join("public");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("safe.txt"), "ok").unwrap();
+        std::fs::write(temp.join("secret.txt"), "private").unwrap();
+        symlink(temp.join("secret.txt"), root.join("link.txt")).unwrap();
+        assert!(static_path_safe(&root, "/safe.txt").await);
+        assert!(!static_path_safe(&root, "/link.txt").await);
+        assert!(!static_path_safe(&root, "/%2e%2e/secret.txt").await);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
     const ROUTES: &str = r#"
 listen = "127.0.0.1:8080"
 [[routes]]
