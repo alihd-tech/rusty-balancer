@@ -64,8 +64,9 @@ class Client(QuicConnectionProtocol):
 async def run(args):
     configuration = QuicConfiguration(is_client=True, alpn_protocols=H3_ALPN)
     configuration.load_verify_locations(cafile=args.ca_certs)
+    configuration.server_name = args.host
     async with connect(
-        args.host,
+        "127.0.0.1",
         args.port,
         configuration=configuration,
         create_protocol=Client,
