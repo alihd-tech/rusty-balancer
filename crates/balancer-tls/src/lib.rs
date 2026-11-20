@@ -1,3 +1,6 @@
+pub mod limits;
+pub use limits::LimitedAcceptor;
+
 use anyhow::{bail, Context, Result};
 use axum::Router;
 use axum_server::{tls_rustls::RustlsConfig, Handle};
@@ -6,6 +9,7 @@ use futures_util::StreamExt;
 use rustls::{server::{ResolvesServerCertUsingSni, ResolvesServerCert, ClientHello}, sign::CertifiedKey, ServerConfig};
 use rustls_acme::{caches::DirCache, AcmeConfig};
 use std::{collections::HashSet, fs::File, io::BufReader, net::SocketAddr, path::Path, sync::Arc};
+use tokio::sync::Semaphore;
 
 fn provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
@@ -108,7 +112,7 @@ pub fn harden_http<A>(server: &mut axum_server::Server<SocketAddr, A>) {
         .keep_alive_timeout(Duration::from_secs(10));
 }
 
-pub async fn serve(tls: TlsConfig, app: Router, handle: Handle<SocketAddr>, manual: Option<RustlsConfig>) -> Result<()> {
+pub async fn serve(tls: TlsConfig, app: Router, handle: Handle<SocketAddr>, manual: Option<RustlsConfig>, connections: Arc<Semaphore>) -> Result<()> {
     let listener = std::net::TcpListener::bind(tls.listen).context("bind HTTPS listener")?;
     listener.set_nonblocking(true)?;
     tracing::info!(address = %listener.local_addr()?, "HTTPS listener bound");
@@ -139,7 +143,8 @@ pub async fn serve(tls: TlsConfig, app: Router, handle: Handle<SocketAddr>, manu
         }
         let _worker = Worker(worker);
         tracing::info!(production = acme.production, "ACME TLS-ALPN-01 enabled");
-        let mut server = axum_server::from_tcp(listener)?.acceptor(acceptor).handle(handle);
+        let mut server = axum_server::from_tcp(listener)?
+            .acceptor(LimitedAcceptor::new(acceptor, connections.clone())).handle(handle);
         harden_http(&mut server);
         server.serve(app.into_make_service_with_connect_info::<SocketAddr>()).await
             .context("serve ACME HTTPS")
@@ -147,7 +152,8 @@ pub async fn serve(tls: TlsConfig, app: Router, handle: Handle<SocketAddr>, manu
         let config = manual.context("missing manual TLS handle")?;
         let acceptor = axum_server::tls_rustls::RustlsAcceptor::new(config)
             .handshake_timeout(std::time::Duration::from_secs(10));
-        let mut server = axum_server::from_tcp(listener)?.acceptor(acceptor).handle(handle);
+        let mut server = axum_server::from_tcp(listener)?
+            .acceptor(LimitedAcceptor::new(acceptor, connections)).handle(handle);
         harden_http(&mut server);
         server.serve(app.into_make_service_with_connect_info::<SocketAddr>()).await
             .context("serve manual HTTPS")
