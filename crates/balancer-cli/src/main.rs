@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use balancer_config::Config;
 use clap::{Parser, Subcommand};
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use tokio::sync::Semaphore;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -30,6 +31,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let address = config.listen;
+    let public_connections = Arc::new(Semaphore::new(config.traffic.max_connections));
     let tls = config.tls.clone();
     let listener = std::net::TcpListener::bind(address).context("bind HTTP listener")?;
     listener.set_nonblocking(true)?;
@@ -65,25 +67,32 @@ async fn main() -> Result<()> {
         if cfg.redirect_http { balancer_http::redirect_router(cfg) } else { data_router.clone() }
     } else { data_router.clone() };
     tracing::info!(address = %listener.local_addr()?, "HTTP listener bound");
+    let http_slots = Arc::clone(&public_connections);
     let http = async {
-        let mut server = axum_server::from_tcp(listener)?.handle(http_handle);
+        let mut server = axum_server::from_tcp(listener)?
+            .acceptor(balancer_tls::LimitedAcceptor::new(axum_server::accept::DefaultAcceptor, http_slots))
+            .handle(http_handle);
         balancer_tls::harden_http(&mut server);
         server.serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await.context("HTTP server")
     };
     let h3_tls = tls.clone();
+    let https_slots = public_connections;
     let h3_router = data_router.clone();
     let https = async {
         if let Some(cfg) = tls {
             let router = balancer_http::https_router(data_router.clone(), &cfg);
-            balancer_tls::serve(cfg, router, https_handle, manual).await?;
+            balancer_tls::serve(cfg, router, https_handle, manual, https_slots).await?;
         }
         Ok::<(), anyhow::Error>(())
     };
     let management = async {
         if let (Some(listener), Some(app)) = (admin_listener, management_app) {
             tracing::info!(address = %listener.local_addr()?, "management listener bound");
-            let mut server = axum_server::from_tcp(listener)?.handle(admin_handle).http1_only();
+            let mut server = axum_server::from_tcp(listener)?
+                .acceptor(balancer_tls::LimitedAcceptor::new(axum_server::accept::DefaultAcceptor,
+                    Arc::new(Semaphore::new(32))))
+                .handle(admin_handle).http1_only();
             balancer_tls::harden_http(&mut server);
             server.serve(app.into_make_service()).await.context("management server")?;
         }
