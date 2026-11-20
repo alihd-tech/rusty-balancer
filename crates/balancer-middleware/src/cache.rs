@@ -85,14 +85,12 @@ fn freshness(headers: &HeaderMap, cap: u64) -> Option<(u64, Duration)> {
             let d = directive.to_ascii_lowercase();
             if d == "public" {
                 public = true;
-            } else if let Some(n) = d.strip_prefix("max-age=") {
-                if max_age.is_some() {
-                    return None;
-                }
-                max_age = Some(n.parse::<u64>().ok()?);
             } else {
-                return None;
-            } // intentionally conservative: no other directives
+                // Intentionally conservative: reject all other directives.
+                let n = d.strip_prefix("max-age=")?;
+                if max_age.is_some() { return None; }
+                max_age = Some(n.parse::<u64>().ok()?);
+            }
         }
     }
     if !public {
