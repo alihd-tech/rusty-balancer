@@ -32,12 +32,16 @@ pid=$!
 for _ in $(seq 1 30); do
   if curl -V | grep -q HTTP3; then
     if curl --noproxy '*' --http3-only --connect-timeout 1 --max-time 2 -fsS --cacert "$tmp/cert.pem" --resolve localhost:18444:127.0.0.1 -w '\n%{http_version}\n' https://localhost:18444/ >"$tmp/body"; then break; fi
-  elif python3 scripts/http3-client-smoke.py --host localhost --port 18444 --ca-certs "$tmp/cert.pem" >"$tmp/body" 2>/dev/null; then
+  elif python3 scripts/http3-client-smoke.py --host localhost --port 18444 --ca-certs "$tmp/cert.pem" >"$tmp/body" 2>"$tmp/client.err"; then
     break
   fi
   kill -0 "$pid" || { cat "$tmp/log"; exit 1; }
   sleep 0.1
 done
-grep -q 'Rusty Balancer' "$tmp/body"
-[[ "$(tail -1 "$tmp/body")" == 3 ]]
+if ! grep -q 'Rusty Balancer' "$tmp/body" || [[ "$(tail -1 "$tmp/body")" != 3 ]]; then
+  echo 'HTTP/3 smoke failed: captured client and server diagnostics:' >&2
+  [[ ! -f "$tmp/client.err" ]] || cat "$tmp/client.err" >&2
+  cat "$tmp/log" >&2
+  exit 1
+fi
 echo 'HTTP/3 smoke checks passed'
