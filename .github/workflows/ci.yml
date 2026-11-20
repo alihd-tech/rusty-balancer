@@ -44,7 +44,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Require committed dependency lockfile
         run: test -f Cargo.lock
-      - name: Check HTTP/3 smoke prerequisites
-        run: curl --version | grep -q HTTP3 || { echo "::error::Runner curl lacks HTTP/3 support; provision an HTTP/3-capable runner"; exit 1; }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install HTTP/3 smoke client
+        run: python -m pip install 'aioquic==1.6.1'
       - name: HTTP/3 end-to-end smoke
         run: bash scripts/http3-smoke.sh
