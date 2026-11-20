@@ -88,7 +88,7 @@ pub fn security_headers(headers: &mut HeaderMap, secure: bool) {
 pub async fn bound_request(
     req: Request<Body>,
     policy: &RoutePolicy,
-) -> Result<Request<Body>, Response> {
+) -> Result<Request<Body>, Box<Response>> {
     let Some(limit) = policy.max_body_bytes else {
         return Ok(req);
     };
@@ -99,7 +99,7 @@ pub async fn bound_request(
         .and_then(|v| v.parse::<u64>().ok())
         .is_some_and(|n| n > limit as u64)
     {
-        return Err(StatusCode::PAYLOAD_TOO_LARGE.into_response());
+        return Err(Box::new(StatusCode::PAYLOAD_TOO_LARGE.into_response()));
     }
     let (mut parts, body) = req.into_parts();
     let buffer = tokio::time::timeout(
@@ -114,8 +114,8 @@ pub async fn bound_request(
             parts.headers.remove(header::CONTENT_LENGTH);
             Ok(Request::from_parts(parts, Body::from(bytes)))
         }
-        Ok(Err(_)) => Err(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
-        Err(_) => Err(StatusCode::REQUEST_TIMEOUT.into_response()),
+        Ok(Err(_)) => Err(Box::new(StatusCode::PAYLOAD_TOO_LARGE.into_response())),
+        Err(_) => Err(Box::new(StatusCode::REQUEST_TIMEOUT.into_response())),
     }
 }
 #[cfg(test)]
