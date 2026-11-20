@@ -1,20 +1,30 @@
-use super::{allowed,pool};
+use super::{allowed, pool};
 use anyhow::Result;
 use balancer_config::transport::UdpService;
 use balancer_lb::Lease;
-use std::{collections::HashMap,net::SocketAddr,sync::Arc,time::Duration};
-use tokio::{net::UdpSocket,sync::mpsc,task::JoinSet,time::Instant};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use tokio::{net::UdpSocket, sync::mpsc, task::JoinSet, time::Instant};
 use tokio_util::sync::CancellationToken;
 
-async fn session(listener:Arc<UdpSocket>,peer:SocketAddr,lease:Lease,mut input:mpsc::Receiver<Vec<u8>>,cfg:Arc<UdpService>)->Result<()> {
-    let target:SocketAddr=lease.endpoint().origin.parse()?;
-    let bind=if target.is_ipv4() {"0.0.0.0:0"}else{"[::]:0"};
-    let socket=UdpSocket::bind(bind).await?;
+async fn session(
+    listener: Arc<UdpSocket>,
+    peer: SocketAddr,
+    lease: Lease,
+    mut input: mpsc::Receiver<Vec<u8>>,
+    cfg: Arc<UdpService>,
+) -> Result<()> {
+    let target: SocketAddr = lease.endpoint().origin.parse()?;
+    let bind = if target.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let socket = UdpSocket::bind(bind).await?;
     socket.connect(target).await?;
-    let idle=Duration::from_millis(cfg.idle_timeout_ms);
-    let lifetime=Instant::now()+Duration::from_secs(cfg.max_lifetime_seconds);
-    let mut deadline=(Instant::now()+idle).min(lifetime);
-    let mut buf=vec![0u8;cfg.max_datagram_bytes+1];
+    let idle = Duration::from_millis(cfg.idle_timeout_ms);
+    let lifetime = Instant::now() + Duration::from_secs(cfg.max_lifetime_seconds);
+    let mut deadline = (Instant::now() + idle).min(lifetime);
+    let mut buf = vec![0u8; cfg.max_datagram_bytes + 1];
     loop {
         tokio::select! {
             _=tokio::time::sleep_until(deadline)=>break,
@@ -31,15 +41,19 @@ async fn session(listener:Arc<UdpSocket>,peer:SocketAddr,lease:Lease,mut input:m
                 deadline=(Instant::now()+idle).min(lifetime);
             }
         }
-        if Instant::now()>=lifetime {break;}
+        if Instant::now() >= lifetime {
+            break;
+        }
     }
     Ok(())
 }
-pub async fn serve(listener:UdpSocket,cfg:UdpService,stop:CancellationToken)->Result<()> {
-    let listener=Arc::new(listener);let cfg=Arc::new(cfg);let pool=pool(&cfg.targets,cfg.strategy);
-    let mut sessions:HashMap<SocketAddr,mpsc::Sender<Vec<u8>>>=HashMap::new();
-    let mut tasks=JoinSet::new();
-    let mut buf=vec![0u8;cfg.max_datagram_bytes+1];
+pub async fn serve(listener: UdpSocket, cfg: UdpService, stop: CancellationToken) -> Result<()> {
+    let listener = Arc::new(listener);
+    let cfg = Arc::new(cfg);
+    let pool = pool(&cfg.targets, cfg.strategy);
+    let mut sessions: HashMap<SocketAddr, mpsc::Sender<Vec<u8>>> = HashMap::new();
+    let mut tasks = JoinSet::new();
+    let mut buf = vec![0u8; cfg.max_datagram_bytes + 1];
     tracing::info!(name=%cfg.name,address=%listener.local_addr()?,"UDP transport listening");
     loop {
         tokio::select! {
@@ -65,6 +79,6 @@ pub async fn serve(listener:UdpSocket,cfg:UdpService,stop:CancellationToken)->Re
         }
     }
     tasks.abort_all();
-    while tasks.join_next().await.is_some(){}
+    while tasks.join_next().await.is_some() {}
     Ok(())
 }

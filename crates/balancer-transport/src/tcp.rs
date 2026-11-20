@@ -1,57 +1,98 @@
-use super::{allowed,pool};
-use anyhow::{bail,Context,Result};
+use super::{allowed, pool};
+use anyhow::{bail, Context, Result};
 use balancer_config::transport::TcpService;
-use balancer_lb::{Lease,Pool};
-use std::{collections::{HashMap,HashSet},io::Cursor,net::SocketAddr,sync::{Arc,Mutex},time::{Duration,Instant}};
-use tokio::{io::{AsyncRead,AsyncReadExt,AsyncWrite,AsyncWriteExt},net::{TcpListener,TcpStream},sync::Semaphore,task::JoinSet};
+use balancer_lb::{Lease, Pool};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Cursor,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::Semaphore,
+    task::JoinSet,
+};
 use tokio_util::sync::CancellationToken;
 
-async fn client_hello(stream: &mut TcpStream) -> Result<(String,Vec<u8>)> {
-    let mut acceptor=rustls::server::Acceptor::default();
-    let mut prefix=Vec::new();
-    let mut buf=[0u8;4096];
+async fn client_hello(stream: &mut TcpStream) -> Result<(String, Vec<u8>)> {
+    let mut acceptor = rustls::server::Acceptor::default();
+    let mut prefix = Vec::new();
+    let mut buf = [0u8; 4096];
     loop {
-        let n=stream.read(&mut buf).await?;
-        if n==0 || prefix.len()+n>65536 { bail!("incomplete or oversized TLS ClientHello"); }
+        let n = stream.read(&mut buf).await?;
+        if n == 0 || prefix.len() + n > 65536 {
+            bail!("incomplete or oversized TLS ClientHello");
+        }
         prefix.extend_from_slice(&buf[..n]);
-        let mut cursor=Cursor::new(&buf[..n]);
-        while cursor.position()<n as u64 {
-            if acceptor.read_tls(&mut cursor)?==0 { bail!("invalid ClientHello record"); }
+        let mut cursor = Cursor::new(&buf[..n]);
+        while cursor.position() < n as u64 {
+            if acceptor.read_tls(&mut cursor)? == 0 {
+                bail!("invalid ClientHello record");
+            }
             match acceptor.accept() {
                 Ok(Some(hello)) => {
-                    let name=hello.client_hello().server_name().context("missing SNI")?.to_ascii_lowercase();
-                    return Ok((name,prefix));
+                    let name = hello
+                        .client_hello()
+                        .server_name()
+                        .context("missing SNI")?
+                        .to_ascii_lowercase();
+                    return Ok((name, prefix));
                 }
-                Ok(None)=>{},
-                Err(_)=>bail!("invalid TLS ClientHello"),
+                Ok(None) => {}
+                Err(_) => bail!("invalid TLS ClientHello"),
             }
         }
     }
 }
 
-fn proxy_line(peer: SocketAddr, local: SocketAddr)->String {
-    match (peer,local) {
-        (SocketAddr::V4(a),SocketAddr::V4(b))=>format!("PROXY TCP4 {} {} {} {}\r\n",a.ip(),b.ip(),a.port(),b.port()),
-        (SocketAddr::V6(a),SocketAddr::V6(b))=>format!("PROXY TCP6 {} {} {} {}\r\n",a.ip(),b.ip(),a.port(),b.port()),
-        _=>"PROXY UNKNOWN\r\n".into()
+fn proxy_line(peer: SocketAddr, local: SocketAddr) -> String {
+    match (peer, local) {
+        (SocketAddr::V4(a), SocketAddr::V4(b)) => format!(
+            "PROXY TCP4 {} {} {} {}\r\n",
+            a.ip(),
+            b.ip(),
+            a.port(),
+            b.port()
+        ),
+        (SocketAddr::V6(a), SocketAddr::V6(b)) => format!(
+            "PROXY TCP6 {} {} {} {}\r\n",
+            a.ip(),
+            b.ip(),
+            a.port(),
+            b.port()
+        ),
+        _ => "PROXY UNKNOWN\r\n".into(),
     }
 }
-async fn pump<R:AsyncRead+Unpin,W:AsyncWrite+Unpin>(mut read:R,mut write:W,activity:Arc<Mutex<Instant>>)->std::io::Result<()> {
-    let mut buf=[0u8;16384];
+async fn pump<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    mut read: R,
+    mut write: W,
+    activity: Arc<Mutex<Instant>>,
+) -> std::io::Result<()> {
+    let mut buf = [0u8; 16384];
     loop {
-        let n=read.read(&mut buf).await?;
-        if n==0 { write.shutdown().await?; return Ok(()); }
+        let n = read.read(&mut buf).await?;
+        if n == 0 {
+            write.shutdown().await?;
+            return Ok(());
+        }
         write.write_all(&buf[..n]).await?;
-        *activity.lock().unwrap_or_else(|e| e.into_inner())=Instant::now();
+        *activity.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
     }
 }
-async fn relay(mut down:TcpStream,mut up:TcpStream,idle:Duration)->Result<()> {
-    let activity=Arc::new(Mutex::new(Instant::now()));
-    let (dr,dw)=down.split();let (ur,uw)=up.split();
-    let watchdog=async {
+async fn relay(mut down: TcpStream, mut up: TcpStream, idle: Duration) -> Result<()> {
+    let activity = Arc::new(Mutex::new(Instant::now()));
+    let (dr, dw) = down.split();
+    let (ur, uw) = up.split();
+    let watchdog = async {
         loop {
             tokio::time::sleep(idle.min(Duration::from_secs(1))).await;
-            if activity.lock().unwrap_or_else(|e|e.into_inner()).elapsed() >= idle { break; }
+            if activity.lock().unwrap_or_else(|e| e.into_inner()).elapsed() >= idle {
+                break;
+            }
         }
     };
     tokio::select! {
@@ -60,43 +101,78 @@ async fn relay(mut down:TcpStream,mut up:TcpStream,idle:Duration)->Result<()> {
     }
     Ok(())
 }
-async fn connect_upstream(pool:&Pool,peer:SocketAddr,deadline:Duration)->Result<(TcpStream,Lease)> {
-    let mut excluded=HashSet::new();
-    let end=tokio::time::Instant::now()+deadline;
+async fn connect_upstream(
+    pool: &Pool,
+    peer: SocketAddr,
+    deadline: Duration,
+) -> Result<(TcpStream, Lease)> {
+    let mut excluded = HashSet::new();
+    let end = tokio::time::Instant::now() + deadline;
     // Retry establishment only, before forwarding client bytes.
     for _ in 0..3 {
-        let Some(lease)=pool.acquire_excluding(peer.ip().to_string().as_bytes(),&excluded) else{break;};
-        let addr:SocketAddr=lease.endpoint().origin.parse()?;
-        let attempt=(tokio::time::Instant::now()+Duration::from_millis(1500)).min(end);
-        if let Ok(Ok(stream))=tokio::time::timeout_at(attempt,TcpStream::connect(addr)).await {return Ok((stream,lease));}
+        let Some(lease) = pool.acquire_excluding(peer.ip().to_string().as_bytes(), &excluded)
+        else {
+            break;
+        };
+        let addr: SocketAddr = lease.endpoint().origin.parse()?;
+        let attempt = (tokio::time::Instant::now() + Duration::from_millis(1500)).min(end);
+        if let Ok(Ok(stream)) = tokio::time::timeout_at(attempt, TcpStream::connect(addr)).await {
+            return Ok((stream, lease));
+        }
         excluded.insert(lease.endpoint().origin.clone());
-        if tokio::time::Instant::now()>=end {break;}
+        if tokio::time::Instant::now() >= end {
+            break;
+        }
     }
     bail!("all attempted TCP targets unavailable")
 }
-async fn connection(mut down:TcpStream,peer:SocketAddr,cfg:Arc<TcpService>,default:Option<Arc<Pool>>,routes:Arc<HashMap<String,Arc<Pool>>>)->Result<()> {
-    let local=down.local_addr()?;
-    let deadline=Duration::from_millis(cfg.connect_timeout_ms);
-    let (selected,prefix)=if routes.is_empty() {(default.context("no TCP target")?,Vec::new())}
-        else {
-            let (host,prefix)=tokio::time::timeout(deadline,client_hello(&mut down)).await??;
-            (routes.get(&host).cloned().or(default).context("unmatched TLS SNI")?,prefix)
-        };
-    let (mut up,lease)=connect_upstream(&selected,peer,deadline).await?;
-    up.set_nodelay(true)?;down.set_nodelay(true)?;
-    tokio::time::timeout(deadline,async {
-        if cfg.proxy_protocol { up.write_all(proxy_line(peer,local).as_bytes()).await?; }
+async fn connection(
+    mut down: TcpStream,
+    peer: SocketAddr,
+    cfg: Arc<TcpService>,
+    default: Option<Arc<Pool>>,
+    routes: Arc<HashMap<String, Arc<Pool>>>,
+) -> Result<()> {
+    let local = down.local_addr()?;
+    let deadline = Duration::from_millis(cfg.connect_timeout_ms);
+    let (selected, prefix) = if routes.is_empty() {
+        (default.context("no TCP target")?, Vec::new())
+    } else {
+        let (host, prefix) = tokio::time::timeout(deadline, client_hello(&mut down)).await??;
+        (
+            routes
+                .get(&host)
+                .cloned()
+                .or(default)
+                .context("unmatched TLS SNI")?,
+            prefix,
+        )
+    };
+    let (mut up, lease) = connect_upstream(&selected, peer, deadline).await?;
+    up.set_nodelay(true)?;
+    down.set_nodelay(true)?;
+    tokio::time::timeout(deadline, async {
+        if cfg.proxy_protocol {
+            up.write_all(proxy_line(peer, local).as_bytes()).await?;
+        }
         up.write_all(&prefix).await
-    }).await??;
-    let result=relay(down,up,Duration::from_millis(cfg.idle_timeout_ms)).await;
+    })
+    .await??;
+    let result = relay(down, up, Duration::from_millis(cfg.idle_timeout_ms)).await;
     drop(lease);
     result
 }
-pub async fn serve(listener:TcpListener,cfg:TcpService,stop:CancellationToken)->Result<()> {
-    let default=(!cfg.targets.is_empty()).then(||pool(&cfg.targets,cfg.strategy));
-    let routes=Arc::new(cfg.sni.iter().map(|r|(r.host.clone(),pool(&r.targets,cfg.strategy))).collect());
-    let limit=Arc::new(Semaphore::new(cfg.max_connections));let cfg=Arc::new(cfg);
-    let mut tasks=JoinSet::new();
+pub async fn serve(listener: TcpListener, cfg: TcpService, stop: CancellationToken) -> Result<()> {
+    let default = (!cfg.targets.is_empty()).then(|| pool(&cfg.targets, cfg.strategy));
+    let routes: Arc<HashMap<String, Arc<Pool>>> = Arc::new(
+        cfg.sni
+            .iter()
+            .map(|r| (r.host.clone(), pool(&r.targets, cfg.strategy)))
+            .collect(),
+    );
+    let limit = Arc::new(Semaphore::new(cfg.max_connections));
+    let cfg = Arc::new(cfg);
+    let mut tasks = JoinSet::new();
     tracing::info!(name=%cfg.name,address=%listener.local_addr()?,"TCP transport listening");
     loop {
         tokio::select! {
@@ -120,14 +196,27 @@ pub async fn serve(listener:TcpListener,cfg:TcpService,stop:CancellationToken)->
         }
     }
     drop(listener);
-    if tokio::time::timeout(Duration::from_secs(30),async{while tasks.join_next().await.is_some(){}}).await.is_err(){tasks.abort_all();}
+    if tokio::time::timeout(Duration::from_secs(30), async {
+        while tasks.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        tasks.abort_all();
+    }
     Ok(())
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn proxy_protocol_is_generated_from_socket_addresses(){
-        assert_eq!(proxy_line("192.0.2.1:1234".parse().unwrap(),"192.0.2.2:443".parse().unwrap()),"PROXY TCP4 192.0.2.1 192.0.2.2 1234 443\r\n");
+    fn proxy_protocol_is_generated_from_socket_addresses() {
+        assert_eq!(
+            proxy_line(
+                "192.0.2.1:1234".parse().unwrap(),
+                "192.0.2.2:443".parse().unwrap()
+            ),
+            "PROXY TCP4 192.0.2.1 192.0.2.2 1234 443\r\n"
+        );
     }
 }

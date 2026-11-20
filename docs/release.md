@@ -11,7 +11,7 @@ bash scripts/release-check.sh
 bash scripts/package.sh
 ```
 
-The strict gate runs formatting, locked compilation, Clippy with warnings denied, workspace unit/integration tests, TLS/admin/network/HTTP3 smoke tests and RustSec audit. Requires Rust stable, Python 3, OpenSSL and a curl build with HTTP/3 support. A failure blocks release. Do not skip the HTTP/3 smoke test when shipping HTTP/3 support. Candidate artifacts are generated locally for the host Linux architecture; inspect the archive and checksum before publishing. The script does not create Git tags, releases or container images in a registry.
+The strict gate runs formatting, locked compilation, Clippy with warnings denied, workspace unit/integration tests, TLS/admin/network/HTTP3 smoke tests and RustSec audit. Requires stable Rust, Python 3 and OpenSSL. HTTP/3 smoke uses either a curl build with HTTP/3 support or the Python `aioquic` package (`python -m pip install aioquic==1.6.1`); CI installs the latter on a separate runner. A failure blocks release. Do not skip the HTTP/3 smoke test when shipping HTTP/3 support. Candidate artifacts are generated locally for the host Linux architecture; inspect the archive and checksum before publishing. The script does not create Git tags, releases or container images in a registry.
 
 ## Docker
 From the repository root:

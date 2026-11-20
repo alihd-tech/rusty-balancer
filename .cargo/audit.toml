@@ -1,0 +1,11 @@
+# Temporary, narrowly scoped exceptions for upstream maintenance warnings.
+# These are *not* memory-safety/security vulnerabilities, and both have no
+# fixed upgrade available at this time. All other advisory warnings remain denied.
+# RUSTSEC-2026-0543: chrono 0.4.45, transitively pulled by rustls-acme 0.15.4.
+# RUSTSEC-2025-0134: rustls-pemfile 2.2.0, direct PEM parsing dependency.
+# Review/remove on dependency migration.
+[advisories]
+ignore = [
+  "RUSTSEC-2026-0543",
+  "RUSTSEC-2025-0134",
+]
