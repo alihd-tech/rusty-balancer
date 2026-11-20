@@ -1,4 +1,5 @@
 name: Pin Rust dependencies
+# Temporary branch-only formatting and dependency locking assistant.
 
 on:
   push:
