@@ -40,18 +40,24 @@ fn expected_accept(headers: &HeaderMap) -> Option<String> {
     Some(STANDARD.encode(hash.finalize()))
 }
 
+/// Request-scoped WebSocket context, grouped to avoid positional arguments.
+pub struct ForwardOptions {
+    pub peer: IpAddr,
+    pub host: Option<String>,
+    pub secure: bool,
+    pub deadline: Duration,
+    pub max_lifetime: Duration,
+}
+
 pub async fn forward(
     client: &HttpClient,
     pool: &Pool,
     mut req: Request<Body>,
-    peer: IpAddr,
-    host: Option<String>,
-    secure: bool,
-    deadline: Duration,
-    max_lifetime: Duration,
+    options: ForwardOptions,
     permit: OwnedSemaphorePermit,
 ) -> Response {
     use http_body::Body as _;
+    let ForwardOptions { peer, host, secure, deadline, max_lifetime } = options;
     if req.method() != Method::GET
         || req.version() != Version::HTTP_11
         || !token(req.headers(), header::CONNECTION, "upgrade")
