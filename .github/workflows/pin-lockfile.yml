@@ -22,13 +22,16 @@ jobs:
         with:
           persist-credentials: true
       - uses: dtolnay/rust-toolchain@stable
-      - name: Generate and commit reviewed lockfile candidate
+        with:
+          components: rustfmt
+      - name: Generate lockfile and normalize workspace formatting
         run: |
           cargo generate-lockfile
-          git add Cargo.lock
+          cargo fmt --all
+          git add Cargo.lock crates
           if ! git diff --cached --quiet; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "chore: pin Rust dependencies"
+            git commit -m "chore: pin Rust dependencies and normalize formatting"
             git push origin "HEAD:${GITHUB_REF_NAME}"
           fi
