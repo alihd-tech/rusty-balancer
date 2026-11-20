@@ -9,7 +9,7 @@ cargo generate-lockfile
 git add Cargo.lock && git commit -m "chore: pin Rust dependencies"
 ```
 
-Rust CI requires locked compilation, formatting, Clippy, tests and RustSec audit.
+Rust CI requires locked compilation, formatting, Clippy, tests and RustSec audit. The audit gate denies new advisories. `.cargo/audit.toml` narrowly exempts two upstream **unmaintained-only** warnings with no available fixed version (`chrono` transitively through `rustls-acme`, and the direct `rustls-pemfile` dependency); these are explicitly tracked technical debt and must be removed when the dependencies can be migrated. Security-vulnerability advisories remain blocking.
 The HTTP/3 smoke job uses a certificate-verifying `aioquic` test client where an HTTP/3-enabled curl is unavailable; a failed HTTP/3 request remains a CI failure.
 Do not consider this change ready for production while these jobs are failing,
 missing, or unverified.
