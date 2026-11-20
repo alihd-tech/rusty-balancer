@@ -1,17 +1,64 @@
 use balancer_config::{Algorithm, PoolConfig};
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicUsize, Ordering}};
+use std::{sync::{Arc, Mutex, atomic::{AtomicBool, AtomicUsize, Ordering}}, time::{Duration, Instant}};
 
 #[derive(Debug)]
 pub struct Endpoint {
     pub origin: String,
     pub weight: u32,
     healthy: AtomicBool,
+    observed: AtomicBool,
+    passive: Mutex<Passive>,
     active: AtomicUsize,
 }
 
+#[derive(Debug)]
+struct Passive {
+    consecutive_failures: u32,
+    ejected_until: Option<Instant>,
+}
+
 impl Endpoint {
-    pub fn is_healthy(&self) -> bool { self.healthy.load(Ordering::Acquire) }
-    pub fn set_healthy(&self, value: bool) { self.healthy.store(value, Ordering::Release); }
+    pub fn is_healthy(&self) -> bool {
+        if !self.healthy.load(Ordering::Acquire) { return false; }
+        let mut passive = self.passive.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(until) = passive.ejected_until {
+            if Instant::now() < until { return false; }
+            passive.ejected_until = None;
+            passive.consecutive_failures = 0;
+        }
+        true
+    }
+    /// Unlike routing eligibility, readiness requires verified reachability.
+    pub fn is_ready(&self) -> bool {
+        self.observed.load(Ordering::Acquire) && self.is_healthy()
+    }
+    pub fn has_observation(&self) -> bool { self.observed.load(Ordering::Acquire) }
+    pub fn set_healthy(&self, value: bool) {
+        self.observed.store(true, Ordering::Release);
+        self.healthy.store(value, Ordering::Release);
+        if value { self.reset_passive(); }
+    }
+    fn reset_passive(&self) {
+        let mut state = self.passive.lock().unwrap_or_else(|e| e.into_inner());
+        state.consecutive_failures = 0;
+        state.ejected_until = None;
+    }
+    pub fn observe_success(&self) {
+        self.observed.store(true, Ordering::Release);
+        self.reset_passive();
+    }
+    /// Eject after three failures without replaying potentially unsafe requests.
+    /// One half-open attempt is allowed once the 15-second cooldown expires.
+    pub fn observe_failure(&self) {
+        self.observed.store(true, Ordering::Release);
+        let mut state = self.passive.lock().unwrap_or_else(|e| e.into_inner());
+        if state.ejected_until.is_some_and(|until| Instant::now() < until) { return; }
+        state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+        if state.consecutive_failures >= 3 {
+            state.ejected_until = Some(Instant::now() + Duration::from_secs(15));
+            state.consecutive_failures = 0;
+        }
+    }
     pub fn active(&self) -> usize { self.active.load(Ordering::Relaxed) }
 }
 
@@ -54,7 +101,9 @@ impl Pool {
     pub fn new(config: &PoolConfig) -> Self {
         let endpoints: Vec<_> = config.endpoints.iter().map(|e| Arc::new(Endpoint {
             origin: e.url.clone(), weight: e.weight,
-            healthy: AtomicBool::new(true), active: AtomicUsize::new(0),
+            healthy: AtomicBool::new(config.health.is_none()), observed: AtomicBool::new(false),
+            passive: Mutex::new(Passive { consecutive_failures: 0, ejected_until: None }),
+            active: AtomicUsize::new(0),
         })).collect();
         let mut ring = Vec::new();
         if config.algorithm == Algorithm::ConsistentHash {
@@ -132,6 +181,29 @@ mod tests {
         assert_eq!(p.acquire(b"").unwrap().endpoint().origin, "http://b");
         p.endpoints()[1].set_healthy(false);
         assert!(p.acquire(b"").is_none());
+    }
+    #[test]
+    fn readiness_requires_observation_and_passive_ejection() {
+        let p = pool(Algorithm::RoundRobin);
+        let endpoint = &p.endpoints()[0];
+        assert!(endpoint.is_healthy());
+        assert!(!endpoint.is_ready());
+        endpoint.observe_success();
+        assert!(endpoint.is_ready());
+        for _ in 0..3 { endpoint.observe_failure(); }
+        assert!(!endpoint.is_healthy());
+        assert!(!endpoint.is_ready());
+    }
+    #[test]
+    fn active_probe_starts_unready_until_first_success() {
+        let config = PoolConfig { algorithm: Algorithm::RoundRobin,
+            endpoints: vec![EndpointConfig { url: "http://a".into(), weight: 1 }],
+            health: Some(balancer_config::HealthConfig { path: "/health".into(), interval_ms: 500,
+                timeout_ms: 100, healthy_threshold: 1, unhealthy_threshold: 1 }) };
+        let p = Pool::new(&config);
+        assert!(p.acquire(b"").is_none());
+        p.endpoints()[0].set_healthy(true);
+        assert!(p.endpoints()[0].is_ready());
     }
     #[test]
     fn connection_retry_exclusion_preserves_health() {
