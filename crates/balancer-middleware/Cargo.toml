@@ -10,5 +10,6 @@ bytes.workspace = true
 http.workspace = true
 http-body.workspace = true
 httpdate.workspace = true
+ipnet.workspace = true
 tokio.workspace = true
 serde.workspace = true
