@@ -103,7 +103,7 @@ fn build_with_permits(config: Config, permits: Arc<Semaphore>) -> Server {
                 .gzip(true)
                 .br(true)
                 .zstd(true)
-                .deflate(false),
+                .no_deflate(),
         )
     } else {
         router
