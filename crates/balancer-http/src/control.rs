@@ -159,8 +159,8 @@ mod tests {
         assert!(control.prometheus().contains("rusty_balancer_requests_total 1"));
         assert_eq!(control.snapshot().revision, 3);
     }
-    #[test]
-    fn readiness_waits_for_observed_upstream_health() {
+    #[tokio::test]
+    async fn readiness_waits_for_observed_upstream_health() {
         let cfg = Config::parse("listen = \"127.0.0.1:8080\"\n[pools.app]\n[[pools.app.endpoints]]\nurl = \"http://127.0.0.1:9001\"\n[[routes]]\npool = \"app\"").unwrap();
         let control = Control::new(cfg);
         assert!(!control.snapshot().ready);
