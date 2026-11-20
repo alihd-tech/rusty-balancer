@@ -59,15 +59,23 @@ pub async fn forward(client: &HttpClient, pool: &Pool, mut req: Request<Body>,
     req.headers_mut().insert(header::UPGRADE, HeaderValue::from_static("websocket"));
     let mut response = match tokio::time::timeout(deadline, client.request(req)).await {
         Ok(Ok(response)) => response,
-        Ok(Err(_)) => return StatusCode::BAD_GATEWAY.into_response(),
-        Err(_) => return StatusCode::GATEWAY_TIMEOUT.into_response(),
+        Ok(Err(_)) => {
+            lease.endpoint().observe_failure();
+            return StatusCode::BAD_GATEWAY.into_response();
+        },
+        Err(_) => {
+            lease.endpoint().observe_failure();
+            return StatusCode::GATEWAY_TIMEOUT.into_response();
+        },
     };
     if response.status() != StatusCode::SWITCHING_PROTOCOLS ||
         !token(response.headers(), header::CONNECTION, "upgrade") ||
         !single(response.headers(), "upgrade").is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket")) ||
         !single(response.headers(), "sec-websocket-accept").is_some_and(|v| v.as_bytes() == accept.as_bytes()) {
+        lease.endpoint().observe_failure();
         return StatusCode::BAD_GATEWAY.into_response();
     }
+    lease.endpoint().observe_success();
     let upstream = hyper::upgrade::on(&mut response);
     let (mut parts, _) = response.into_parts();
     strip_hop_headers(&mut parts.headers);
