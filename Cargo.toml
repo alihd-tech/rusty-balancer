@@ -37,6 +37,7 @@ http = "1"
 http-body = "1"
 httpdate = "1"
 ipnet = { version = "2", features = ["serde"] }
+percent-encoding = "2.3"
 sha1 = "0.10"
 base64 = "0.22"
 balancer-middleware = { path = "crates/balancer-middleware" }
