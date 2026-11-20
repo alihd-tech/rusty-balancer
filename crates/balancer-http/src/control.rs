@@ -176,9 +176,10 @@ impl Control {
             })
             .collect();
         let ready = r.routes.iter().all(|route| {
-            route.pool.as_ref().is_none_or(|name| {
-                r.pools[name].endpoints().iter().any(|e| e.is_ready())
-            })
+            route
+                .pool
+                .as_ref()
+                .is_none_or(|name| r.pools[name].endpoints().iter().any(|e| e.is_ready()))
         });
         Snapshot {
             revision: generation.revision,
