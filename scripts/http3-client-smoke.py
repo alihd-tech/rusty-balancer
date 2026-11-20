@@ -15,11 +15,11 @@ from aioquic.quic.events import ConnectionTerminated
 class Client(QuicConnectionProtocol):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.http = H3Connection(self.quic_connection)
+        self.http = H3Connection(self._quic)
         self.requests = {}
 
     async def get(self, authority, path):
-        stream_id = self.quic_connection.get_next_available_stream_id()
+        stream_id = self._quic.get_next_available_stream_id()
         future = asyncio.get_running_loop().create_future()
         self.requests[stream_id] = (future, None, bytearray())
         self.http.send_headers(
