@@ -4,7 +4,12 @@ listen = "127.0.0.1:8080"
 compression = true
 security_headers = true
 max_in_flight = 512
+# Combined accepted socket budget for HTTP and HTTPS; requires restart.
+max_connections = 4096
 response_idle_ms = 30000
+# Configure only CIDRs of trusted ingress proxies (e.g. an internal proxy).
+# Untrusted X-Forwarded-For input is always ignored.
+trusted_proxies = []
 
 [pools.app]
 [[pools.app.endpoints]]
