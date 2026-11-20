@@ -40,6 +40,7 @@ pub struct EndpointStatus {
     pub weight: u32,
     pub eligible: bool,
     pub observed: bool,
+    pub verified: bool,
     pub active: usize,
 }
 #[derive(Serialize)]
@@ -155,6 +156,7 @@ impl Control {
                         weight: e.weight,
                         eligible: e.is_healthy(),
                         observed: e.has_observation(),
+                    verified: e.has_verification(),
                         active: e.active(),
                     })
                     .collect(),
