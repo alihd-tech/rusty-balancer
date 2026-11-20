@@ -1,9 +1,8 @@
 # P0/P1 hardening status
 
 The first release gate is **reproducibility**. The generated `Cargo.lock` must be committed.
-On the `hardening/p0-p1-20261121` branch the `Pin Rust dependencies` workflow
-attempts to generate and commit the file with the repository's Rust toolchain.
-If Actions is disabled or lacks write permissions, run:
+The branch bootstrap workflow generated and committed a `Cargo.lock` using the Rust toolchain.
+On future dependency updates, generate a fresh lockfile using:
 
 ```sh
 cargo generate-lockfile
