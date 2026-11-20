@@ -2,7 +2,7 @@
 //! The permit is acquired before a TLS handshake and follows the socket until
 //! the connection (including an upgraded tunnel) closes.
 use axum_server::accept::Accept;
-use std::{future::Future, io, net::SocketAddr, pin::Pin, sync::Arc, task::{Context, Poll}};
+use std::{future::Future, io, pin::Pin, sync::Arc, task::{Context, Poll}};
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     net::TcpStream,
