@@ -305,11 +305,13 @@ async fn dispatch_inner(
                 &runtime.client,
                 &runtime.pools[pool],
                 request,
-                client_ip,
-                forwarded_host,
-                secure,
-                runtime.timeout,
-                Duration::from_secs(policy.websocket_max_seconds.unwrap_or(3600)),
+                balancer_proxy::websocket::ForwardOptions {
+                    peer: client_ip,
+                    host: forwarded_host,
+                    secure,
+                    deadline: runtime.timeout,
+                    max_lifetime: Duration::from_secs(policy.websocket_max_seconds.unwrap_or(3600)),
+                },
                 permit,
             )
             .await;
