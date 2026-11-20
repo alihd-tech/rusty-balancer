@@ -57,7 +57,13 @@ pub async fn forward(
     permit: OwnedSemaphorePermit,
 ) -> Response {
     use http_body::Body as _;
-    let ForwardOptions { peer, host, secure, deadline, max_lifetime } = options;
+    let ForwardOptions {
+        peer,
+        host,
+        secure,
+        deadline,
+        max_lifetime,
+    } = options;
     if req.method() != Method::GET
         || req.version() != Version::HTTP_11
         || !token(req.headers(), header::CONNECTION, "upgrade")

@@ -88,7 +88,9 @@ fn freshness(headers: &HeaderMap, cap: u64) -> Option<(u64, Duration)> {
             } else {
                 // Intentionally conservative: reject all other directives.
                 let n = d.strip_prefix("max-age=")?;
-                if max_age.is_some() { return None; }
+                if max_age.is_some() {
+                    return None;
+                }
                 max_age = Some(n.parse::<u64>().ok()?);
             }
         }
