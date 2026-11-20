@@ -10,7 +10,7 @@ git add Cargo.lock && git commit -m "chore: pin Rust dependencies"
 ```
 
 Rust CI requires locked compilation, formatting, Clippy, tests and RustSec audit.
-The HTTP/3 smoke job requires an HTTP/3-enabled curl runner and fails closed otherwise.
+The HTTP/3 smoke job uses a certificate-verifying `aioquic` test client where an HTTP/3-enabled curl is unavailable; a failed HTTP/3 request remains a CI failure.
 Do not consider this change ready for production while these jobs are failing,
 missing, or unverified.
 
