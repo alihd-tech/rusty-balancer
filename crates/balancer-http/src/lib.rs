@@ -293,7 +293,7 @@ async fn dispatch_inner(
     let request = std::mem::replace(request, Request::new(Body::empty()));
     let mut request = match balancer_middleware::bound_request(request, policy).await {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let secure = ingress.is_some();
     if let Some(pool) = &route.pool {
