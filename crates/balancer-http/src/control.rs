@@ -60,7 +60,8 @@ impl Control {
         if history.retired.upgrade().is_some() { bail!("previous generation still draining"); }
         let prior = &old.config;
         if next.listen != prior.listen || next.tls != prior.tls || next.admin != prior.admin ||
-            next.traffic.max_in_flight != prior.traffic.max_in_flight || next.transport != prior.transport || next.http3 != prior.http3 {
+            next.traffic.max_in_flight != prior.traffic.max_in_flight ||
+            next.traffic.max_connections != prior.traffic.max_connections || next.transport != prior.transport || next.http3 != prior.http3 {
             bail!("listener, TLS, transport, admin identity and global concurrency limit require restart");
         }
         let revision = old.revision.checked_add(1).ok_or_else(|| anyhow::anyhow!("revision exhausted"))?;

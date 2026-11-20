@@ -81,7 +81,7 @@ impl TlsConfig {
     }
 
     fn validate(&mut self, http: SocketAddr) -> Result<()> {
-        if self.listen.port() == 0 || self.external_port() == 0 || self.listen == http {
+        if self.listen.port() == 0 || self.external_port() == 0 || self.listen.port() == http.port() {
             bail!("TLS requires a distinct listener and nonzero ports");
         }
         if self.certificates.is_empty() == self.acme.is_none() {
@@ -178,11 +178,14 @@ pub struct TrafficConfig {
     pub compression: bool,
     pub security_headers: bool,
     pub max_in_flight: usize,
+    pub max_connections: usize,
     pub response_idle_ms: u64,
+    pub trusted_proxies: Vec<ipnet::IpNet>,
 }
 impl Default for TrafficConfig {
     fn default() -> Self {
-        Self { compression: false, security_headers: false, max_in_flight: 1024, response_idle_ms: 30000 }
+        Self { compression: false, security_headers: false, max_in_flight: 1024, max_connections: 4096,
+            response_idle_ms: 30000, trusted_proxies: Vec::new() }
     }
 }
 
@@ -309,7 +312,10 @@ impl Config {
             .flat_map(|p| &p.endpoints).map(|e| u64::from(e.weight) * 64).sum();
         if ring_nodes > 2_000_000 { bail!("consistent hash ring capacity exceeded"); }
         if !(1..=100_000).contains(&self.traffic.max_in_flight) ||
-            !(1..=300_000).contains(&self.traffic.response_idle_ms) {
+            !(1..=100_000).contains(&self.traffic.max_connections) ||
+            !(1..=300_000).contains(&self.traffic.response_idle_ms) ||
+            self.traffic.trusted_proxies.len() > 64 ||
+            self.traffic.trusted_proxies.iter().any(|net| net.prefix_len() == 0) {
             bail!("invalid traffic resource limits");
         }
         let mut cache_budget = 0usize;
@@ -386,6 +392,27 @@ mod tests {
         assert!(path_matches("/api", "/api"));
         assert!(!path_matches("/api", "/apix"));
         assert_eq!(hostname("Example.COM:8080").as_deref(), Some("example.com"));
+    }
+    #[test]
+    fn rejects_overlapping_listener_ports() {
+        let tls = r#"listen = "127.0.0.1:8080"
+[tls]
+listen = "0.0.0.0:8080"
+[[tls.certificates]]
+domains = ["example.test"]
+cert = "cert.pem"
+key = "key.pem"
+[[routes]]
+static_dir = "public"
+"#;
+        assert!(Config::parse(tls).is_err());
+    }
+    #[test]
+    fn validates_connection_and_trusted_proxy_limits() {
+        let base = "listen = \"127.0.0.1:8080\"\n[[routes]]\nstatic_dir = \"public\"";
+        assert!(Config::parse(&format!("{base}\n[traffic]\nmax_connections = 0")).is_err());
+        assert!(Config::parse(&format!("{base}\n[traffic]\ntrusted_proxies = [\"0.0.0.0/0\"]")).is_err());
+        assert!(Config::parse(&format!("{base}\n[traffic]\ntrusted_proxies = [\"192.0.2.0/24\"]")).is_ok());
     }
     #[test]
     fn tls_modes_and_https_origins() {

@@ -1,0 +1,34 @@
+name: Pin Rust dependencies
+
+on:
+  push:
+    branches:
+      - hardening/p0-p1-20261121
+    paths:
+      - Cargo.toml
+      - crates/**/Cargo.toml
+      - .github/workflows/pin-lockfile.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Generate and commit reviewed lockfile candidate
+        run: |
+          cargo generate-lockfile
+          git add Cargo.lock
+          if ! git diff --cached --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: pin Rust dependencies"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
