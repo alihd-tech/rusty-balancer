@@ -33,7 +33,7 @@ class Client(QuicConnectionProtocol):
             end_stream=True,
         )
         self.transmit()
-        return await asyncio.wait_for(future, timeout=8)
+        return await asyncio.wait_for(future, timeout=3)
 
     def quic_event_received(self, event):
         for item in self.http.handle_event(event):
